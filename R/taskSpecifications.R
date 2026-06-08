@@ -1,6 +1,6 @@
 taskSpecifications <- function(plp, output) {
   
-  if (plp == "Test") {
+  if (plp == "Eunomia") {
     
     # Get connection details
     connectionDetails <- Eunomia::getEunomiaConnectionDetails()
@@ -62,5 +62,7 @@ taskSpecifications <- function(plp, output) {
     return(targetId)
   } else if (output == "outcomeId") {
     return(outcomeId)
+  } else if (output == "databaseDetails") {
+    return(databaseDetails)
   }
 }

@@ -51,4 +51,6 @@ createPredictors <- function(plp, covariates, databaseDetails, outputFolder) {
     PatientLevelPrediction::savePlpData(plpData = plpData, file=paste0(outputFolder, "/plpData_", plp, "_", covariates))
     
   }
+  
+  return(plpData)
 }
