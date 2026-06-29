@@ -4,12 +4,11 @@ runModels <- function(plp, plpData, model, iteration, outputFolder) {
   populationSettings <- taskSpecifications(plp, "populationSettings")
   seed <- 1000 + iteration
 
-  if (model == "ExistingScore") { # esisting score models
-    # TODO: create function from plpData to create predictors and compute score
-    # model_settings <- list(analysisId=paste0("existing_CHADS2"),
-    #                                   analysisName=paste0("Apply CHADS2"),
-    #                                   modelSettings=setCHADS2())
-    
+  if (model == "ExistingScore") { # existing score models
+    model_settings <- list(analysisId=paste0("existing_CHADS2"),
+                                      analysisName=paste0("Apply CHADS2"),
+                                      modelSettings=setCHADS2())
+
   } else if (startsWith(model, "LLM_")) { # large language models
     systemprompt_file<-paste0("systemprompt_", "Dementia",".md")
     print(systemprompt_file) # just to be certain during run time

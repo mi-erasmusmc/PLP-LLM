@@ -34,7 +34,7 @@ fitCHADS2 <- function(trainData,
   settings <- attr(param, 'settings')
 
   # Getting predictions on train set:
-  tempModel <- list(model = NULL)
+  tempModel <- list(model = list(modelType = attr(param, 'modelType')))
   attr(tempModel, "modelType") <- attr(param, 'modelType')
 
   prediction <- predictCHADS2(
@@ -45,11 +45,11 @@ fitCHADS2 <- function(trainData,
   prediction$evaluationType <- 'Train'
 
   result <- list(
-    model = NULL,
+    model = list(modelType = attr(param, 'modelType')),
 
     preprocessing = list(
-      featureEngineering = attr(trainData, "metaData")$featureEngineering,#learned mapping
-      tidyCovariates = attr(trainData$covariateData, "metaData")$tidyCovariateDataSettings,  #learned mapping
+      featureEngineering = attr(trainData, "metaData")$featureEngineering,
+      tidyCovariates = attr(trainData$covariateData, "metaData")$tidyCovariateDataSettings,
       requireDenseMatrix = F
     ),
 
@@ -58,7 +58,7 @@ fitCHADS2 <- function(trainData,
     modelDesign = PatientLevelPrediction::createModelDesign(
       targetId = attr(trainData, "metaData")$targetId, # added
       outcomeId = attr(trainData, "metaData")$outcomeId, # added
-      restrictPlpDataSettings = attr(trainData, "metaData")$restrictPlpDataSettings, # made this restrictPlpDataSettings
+      restrictPlpDataSettings = attr(trainData, "metaData")$restrictPlpDataSettings,
       covariateSettings = attr(trainData, "metaData")$covariateSettings,
       populationSettings = attr(trainData, "metaData")$populationSettings,
       featureEngineeringSettings = attr(trainData, "metaData")$featureEngineeringSettings,
@@ -70,14 +70,13 @@ fitCHADS2 <- function(trainData,
 
     trainDetails = list(
       analysisId = analysisId,
-      analysisSource = '', #TODO: add from model
+      analysisSource = '',
       developmentDatabase = attr(trainData, "metaData")$cdmDatabaseSchema,
       attrition = attr(trainData, "metaData")$attrition,
       trainingTime =  "0.0 mins",
       trainingDate = Sys.Date(),
       modelName = settings$modelType,
-      finalModelParameters = list() #TODO: add parameters
-      # hyperParamSearch = cvPerFold
+      finalModelParameters = list()
     ),
 
     covariateImportance = NULL
@@ -92,106 +91,80 @@ fitCHADS2 <- function(trainData,
 
 #' @export
 predictCHADS2 <- function(plpModel, data, cohort) {
-
-  # CHADS2 model (with ids referring to predictors PhenotypeLibrary)
-  # CHF history + 1 -> # 1154
-  # hypertension history + 1 -> # 1198
-  # age >= 75 year + 1 -> -> ifelse(# 1002 >= 75, 1 , 0)
-  # diabetes mellitus history + 1 -> max (# 1193, # 1194) -> now 888
-  # stroke or TIA previously + 2 -> # 1657 x 2
-
-  # Convert to dense covariates
-  covariates <- as.data.frame(data$covariateData$covariates)
-
-  # Select only covariates included in model
-  included_covs <- c(1154, 1198, 888, 1657)
-  # included_covs <- c(1154, 1198, 1193, 1194, 1657)
-  covariates <- covariates[covariates$covariateId %in% c(1002, included_covs*100000+1999),]
-
-  # Reshape covariate data
-  denseData <- reshape2::dcast(covariates, rowId ~ covariateId, value.var = 'covariateValue', fill = 0)
-
-  # Apply existing model
-  denseData$`1002` <- ifelse( denseData$`1002` >= 75, 1, 0)
-  # denseData$`119301999` <- max(denseData$`119301999`, denseData$`119401999`)
-  # denseData$`119401999` <- NULL
-  denseData$`165701999` <- denseData$`165701999`*2
-  denseData$rowId <- NULL
-
-  denseData$sum <- rowSums(denseData) # CHADS2 score
-
-  score_to_prob <- list("0" = 0.019,
-                        "1" = 0.029,
-                        "2" = 0.04,
-                        "3" = 0.059,
-                        "4" = 0.085,
-                        "5" = 0.125,
-                        "6" = 0.182)
-
-  prob <- sapply(denseData$sum, function(i) score_to_prob[[as.character(i)]]) # CHADS2 probability
-
-  prediction <- data.frame(rowId=cohort$rowId, value=as.numeric(prob))
-
-  # return the cohorts as a data frame with the prediction added as
-  # a new column with the column name 'value'
-  prediction <- merge(cohort, prediction, by='rowId', all.x=T)
-  attr(prediction, "metaData")$modelType <- plpModel$model$modelType
+  chads2_scores <- computeChads2FromCovariateData(data$covariateData, cohort$rowId)
+  prediction <- merge(cohort, chads2_scores[,c("rowId", "probs")], by='rowId', all.x=TRUE)
+  attr(prediction, "metaData")$modelType <- attr(plpModel, "modelType")
 
   return(prediction)
 }
 
-addCHADS2 <- function(plpData) {
 
-  covariateData <- plpData$covariateData
-
-  # update covariates
+computeChads2FromCovariateData <- function(plpData) {
+  # Congestive heart failure (CHF) = 1, ICD-10 3-char: I50 (45581779)
+  # Hypertension = 1, ICD-10 3-char: I10 (45591453), I11 (45548007), I12 (45567162), I13 (45576864), I15 (45562338
+  # Age ≥ 75 = 1 (from age variable,included as continuous covariateValue can be found in covariateId = 1002) 
+  # Diabetes mellitus = 1, ICD-10 3-char: E10 (45576436), E11 (45571656), E12 (45586141), E13 (45566732), E14 (45571663)
+  # Stroke / TIA / thromboembolism = 2, ICD-10 3-char: I63 (45543186), I64 (45548032), G45 (45562092), I69 (45543192)
+  
   covariates <- as.data.frame(covariateData$covariates)
-
-  # CHADS2 model (with ids referring to predictors PhenotypeLibrary)
-  # CHF history + 1 -> # 1154
-  # hypertension history + 1 -> # 1198
-  # age >= 75 year + 1 -> -> ifelse(# 1002 >= 75, 1 , 0)
-  # diabetes mellitus history + 1 -> max (# 1193, # 1194) -> now 888
-  # stroke or TIA previously + 2 -> # 1657 x 2
-
-  # Select only covariates included in model
-  included_covs <- c(1154, 1198, 888, 1657)
-  score <- covariates[covariates$covariateId %in% c(1002, included_covs*100000+1999),]
-
-  # Apply existing model
-  score$covariateValue[score$covariateId == '1002']<-ifelse(score$covariateValue[score$covariateId == '1002'] >= 75, 1, 0) # age
-  score$covariateValue[score$covariateId == '165701999']<-score$covariateValue[score$covariateId == '165701999']*2 # hypertension
-
-  chads2 <- score %>% group_by(rowId) %>% summarise(covariateValue=sum(covariateValue))  # CHADS2 score
-  chads2[is.na(chads2)] <- 0
-  # chads2 <- chads2[!is.na(chads2$covariateValue),]
-  chads2$covariateId <- 77701999
-
-  # plot(chads2$covariateValue[order(chads2$covariateValue)])
-
-  # Add to original covariates
-  covariates <- rbind(covariates,chads2)
-
-  # update analysisRef
-  analysisRef <- as.data.frame(covariateData$analysisRef)
-  analysisRef <- rbind(analysisRef, list(999, "CHADS2", "custom", -36500, -1, "N", "Y"))
-
-  # update covariateRef
-  covariateRef <- as.data.frame(covariateData$covariateRef)
-  covariateRef <- rbind(covariateRef, list(77701999, "CHADS2", 999, 0))
-
-  result <- Andromeda::andromeda(
-    covariates = covariates,
-    covariateRef = covariateRef,
-    analysisRef = analysisRef
+  
+  # Define predictors. 
+  predictor_covariate_ids <- list(
+    `CHF history` = c(45581779),
+    `Hypertension history` = c(45591453, 45548007, 45567162, 45576864, 45562338),
+    `Age >= 75` = c(1002),
+    `Diabetes mellitus history` = c(45576436, 45571656, 45586141, 45566732, 45571663),
+    `Stroke or TIA symptoms previously` = c(45543186, 45548032, 45562092, 45543192)
   )
-
-  attr(result, "metaData") <- attr(covariateData, "metaData")
-  class(result) <- "CovariateData"
-
-  plpData$covariateData <- result
-
-  return(plpData)
+  
+  # Reverse lookup: covariateId -> predictor.
+  covariate_to_predictor <- unlist(
+    lapply(names(predictor_covariate_ids), function(p) {
+      setNames(rep(p, length(predictor_covariate_ids[[p]])), predictor_covariate_ids[[p]])
+    })
+  )
+  
+  # Add predictor column; NA if not in dictionary.
+  covariates$predictor <- covariate_to_predictor[as.character(covariates$covariateId)]
+  # covariates$predictor <- unname(covariates$predictor)
+  
+  # Convert covariateValue into 0/1 based on threshold.
+  covariates <- covariates %>%
+    mutate(covariateValue = ifelse(predictor == "Age >= 75",
+                                   as.integer(as.numeric(covariateValue) >= 75),
+                                   as.integer(covariateValue > 0)))
+  
+  df_model <- covariates %>%
+    group_by(rowId, predictor) %>%
+    summarise(value = max(covariateValue, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(
+      names_from = predictor,
+      values_from = value,
+      values_fill = 0
+    )
+  
+  # Then compute the composite score. 
+  # Make sure all predictors exist as columns.
+  all_predictors <- names(predictor_covariate_ids)
+  for (p in all_predictors) {
+    if (!p %in% names(df_model)) {
+      df_model[[p]] <- 0
+    }
+  }
+  
+  df_model <- df_model %>%
+    mutate(
+      score =
+        `CHF history` +
+        `Hypertension history` +
+        `Diabetes mellitus history` +
+        2L * `Stroke or TIA symptoms previously` +
+        `Age >= 75`
+    )
+  
+  # Convert to predicted probability
+  score_to_prob <- c(0 = 0.019, 1 = 0.029, 2 = 0.040, 3 = 0.059, 4 = 0.085, 5 = 0.125, 6 = 0.182)
+  df_model$probs <- score_to_prob[df_model$score]
+  
+  return(df_model[,c("rowId", "score", "probs")])
 }
-
-

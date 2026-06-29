@@ -21,7 +21,7 @@ source(file.path(root, "R", "taskSpecifications.R"))
 source(file.path(root, "R", "generateCohorts.R"))
 source(file.path(root, "R", "createPredictors.R"))
 source(file.path(root, "R", "runModels.R"))
-# source(file.path(root, "R", "existingModels.R"))
+source(file.path(root, "R", "existingModels.R"))
 source(file.path(root, "R", "llmPredict.R"))
 source(file.path(root, "R", "studyOutput.R"))
 
@@ -68,7 +68,7 @@ for (plp in plptasks) {
     outputFolder = outputFolder
   )
 
-  models <- c("LASSO") # "ExistingScore", "LLM_Qwen3"
+  models <- c("LASSO", "ExistingScore") # "ExistingScore", "LASSO", "LLM_Qwen3"
 
   for (m in models) {
     iterations_m <- ifelse(m != "ExistingScore", iterations, 1)
