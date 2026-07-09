@@ -1,11 +1,16 @@
+
 ### Settings
-test <- TRUE
 rerun <- FALSE
-plptasks <- if (test) c("Eunomia") else c("CHADS2")
-covariates <- "AgeSex" # "GroupedFeatures"
+plptasks <- c("CHADS2")
+#covariates = "AgeSex"
+#covariates = "Full"
+covariates = "GroupedFeatures"
 iterations <- 2
 
 ### Libraries & paths
+library(PatientLevelPrediction)
+library(rlang)
+
 root <- getwd()
 name <- Sys.Date()
 
@@ -15,75 +20,65 @@ if (!dir.exists(outputFolder)) {
 }
 
 ### Files
-library(PatientLevelPrediction)
-library(rlang)
-source(file.path(root, "R", "taskSpecifications.R"))
-source(file.path(root, "R", "generateCohorts.R"))
-source(file.path(root, "R", "createPredictors.R"))
-source(file.path(root, "R", "runModels.R"))
-source(file.path(root, "R", "existingModels.R"))
-source(file.path(root, "R", "llmPredict.R"))
-source(file.path(root, "R", "studyOutput.R"))
+source("~/Documents/Projects/PLP-LLM/R/taskSpecifications.R")
+source("~/Documents/Projects/PLP-LLM/R/generateCohorts.R")
+source("~/Documents/Projects/PLP-LLM/R/createPredictors.R")
+source("~/Documents/Projects/PLP-LLM/R/runModels.R")
+source("~/Documents/Projects/PLP-LLM/R/existingModels.R")
+source("~/Documents/Projects/PLP-LLM/R/llmPredict.R")
+source("~/Documents/Projects/PLP-LLM/R/groupingFunctions.R")
 
-### Database setup
-if (test) {
-  databaseDetails <- taskSpecifications("Eunomia", "databaseDetails")
-} else {
-  connectionDetails <- DatabaseConnector::createConnectionDetails(
-    dbms = Sys.getenv("DB_DBMS"),
-    server = paste(Sys.getenv("DB_SERVER"), "CDM-S-20250415", sep = "/"),
-    user = Sys.getenv("DB_USER"),
-    password = Sys.getenv("DB_PW"),
-    port = Sys.getenv("DB_PORT")
-  )
+### Database connection
+connectionDetails <- DatabaseConnector::createConnectionDetails(dbms = Sys.getenv("DB_DBMS"),
+                                                                server = paste(Sys.getenv("DB_SERVER"), "CDM-S-20250415", sep="/"),
+                                                                user = Sys.getenv("DB_USER"),
+                                                                password = Sys.getenv("DB_PW"),
+                                                                port = Sys.getenv("DB_PORT"))
 
-  databaseDetails <- PatientLevelPrediction::createDatabaseDetails(
-    connectionDetails = connectionDetails,
-    cdmDatabaseSchema = "cdm",
-    cdmDatabaseId = "CDM-S-20250415",
-    cohortDatabaseSchema = "aniektom",
-    cohortTable = "LLM_cohorts",
-    cdmDatabaseName = "IPCI"
-  )
-}
+databaseDetails <- PatientLevelPrediction::createDatabaseDetails(connectionDetails = connectionDetails,
+                                                                 cdmDatabaseSchema = "cdm",
+                                                                 cdmDatabaseId = "CDM-S-20250415", 
+                                                                 cohortDatabaseSchema = "aniektom",
+                                                                 cohortTable = "LLM_cohorts",
+                                                                 cdmDatabaseName = "IPCI")
 
 ### Generate target and outcome cohorts
-if (rerun && !test) {
-  generateCohorts(
-    root = root,
-    csv = "cohortsToCreate_tasks.csv",
-    databaseDetails = databaseDetails,
-    connectionDetails = connectionDetails,
-    createDBtables = TRUE,
-    getCohortsATLAS = FALSE
-  )
+if (rerun) {
+  generateCohorts(root = root,
+                  csv = "cohortsToCreate_tasks.csv",
+                  databaseDetails = databaseDetails,
+                  connectionDetails = connectionDetails,
+                  createDBtables = TRUE, # set to FALSE after 1 time running
+                  getCohortsATLAS = FALSE) 
 }
 
-### Run models
+#### Run models
 for (plp in plptasks) {
-  plpData <- createPredictors(
-    plp = plp,
-    covariates = covariates,
-    databaseDetails = databaseDetails,
-    outputFolder = outputFolder
-  )
-
-  models <- c("LASSO", "ExistingScore") # "ExistingScore", "LASSO", "LLM_Qwen3"
-
+  
+  # Predictors
+  plpData <- createPredictors(plp = plp,
+                              covariates = covariates,
+                              databaseDetails = databaseDetails,
+                              outputFolder = outputFolder)
+  
+  # Model
+  models <- c("ExistingScore") # "ExistingScore", "LLM_Qwen3"
+  
   for (m in models) {
     iterations_m <- ifelse(m != "ExistingScore", iterations, 1)
-
+    
     for (i in 1:iterations_m) {
-      runModels(
-        plp = plp,
-        plpData = plpData,
-        model = m,
-        iteration = i,
-        outputFolder = outputFolder
-      )
+      runModels(plp = plp,
+                plpData = plpData,
+                model = m,
+                iteration = i,
+                outputFolder = outputFolder)
     }
   }
 }
 
 ### Evaluation metrics & output figures
 studyOutput(outputFolder)
+
+
+

@@ -15,12 +15,13 @@ createPredictors <- function(plp, covariates, databaseDetails, outputFolder) {
     covariateSettingList <- FeatureExtraction::createCovariateSettings(useDemographicsGender = T,
                                                                        useDemographicsAge = T,
                                                                        useConditionGroupEraLongTerm = T,
-                                                                       useDrugGroupEraLongTerm = T)
+                                                                       useDrugGroupEraLongTerm = F,  # ingredients + higher level groups
+                                                                       useDrugEraLongTerm = T)
   } else if (covariates == "GroupedFeatures") {
     covariateSettingList <- FeatureExtraction::createCovariateSettings(useDemographicsGender = T,
                                                                        useDemographicsAge = T,
-                                                                       useConditionGroupEraShortTerm = T,
-                                                                       useDrugGroupEraShortTerm = T)
+                                                                       useConditionEraAnyTimePrior = T,
+                                                                       useDrugEraAnyTimePrior = T) #ingredients only
   }
   
   # Selected covariates
@@ -28,6 +29,7 @@ createPredictors <- function(plp, covariates, databaseDetails, outputFolder) {
   if (file.exists(paste0(outputFolder, "/plpData_", plp,"_", covariates))) {
     print("load plpData")
     plpData <- loadPlpData(paste0(outputFolder, "/plpData_", plp, "_", covariates))
+    #plpData <- loadPlpData(paste0(outputFolder, "/plpData_", plptasks, "_", covariates))
   } else {
     print("create plpData")
     plpData <- PatientLevelPrediction::getPlpData(
@@ -36,19 +38,16 @@ createPredictors <- function(plp, covariates, databaseDetails, outputFolder) {
       covariateSettings = covariateSettingList
     )
     
-
     if (covariates == "GroupedFeatures") {
-      
-      # TODO: apply mapping
-      
-      
+      covariateData_new<-groupingfunction(plpData$covariateData,databaseDetails$connectionDetails)
+      plpData$covariateData<-covariateData_new
     }
     
     # Save covariates
     covData <- FeatureExtraction::aggregateCovariates(plpData$covariateData)
     write.csv(as.data.frame(covData$covariates), file.path(outputFolder, paste0("covData_", plp, "_", covariates, ".csv")), row.names = FALSE)
     
-    PatientLevelPrediction::savePlpData(plpData = plpData, file=paste0(outputFolder, "/plpData_", plp, "_", covariates))
+    PatientLevelPrediction::savePlpData(plpData = plpData, file=paste0(outputFolder, "/plpData_", plp, "_", covariates), main)
     
   }
   

@@ -91,8 +91,9 @@ fitCHADS2 <- function(trainData,
 
 #' @export
 predictCHADS2 <- function(plpModel, data, cohort) {
-  chads2_scores <- computeChads2FromCovariateData(data$covariateData, cohort$rowId)
-  prediction <- merge(cohort, chads2_scores[,c("rowId", "probs")], by='rowId', all.x=TRUE)
+  chads2_scores <- computeChads2FromCovariateData(data)
+  prediction <- cohort
+  prediction$value <- chads2_scores$probs[match(cohort$rowId, chads2_scores$rowId)]
   attr(prediction, "metaData")$modelType <- attr(plpModel, "modelType")
 
   return(prediction)
@@ -106,16 +107,19 @@ computeChads2FromCovariateData <- function(plpData) {
   # Diabetes mellitus = 1, ICD-10 3-char: E10 (45576436), E11 (45571656), E12 (45586141), E13 (45566732), E14 (45571663)
   # Stroke / TIA / thromboembolism = 2, ICD-10 3-char: I63 (45543186), I64 (45548032), G45 (45562092), I69 (45543192)
   
-  covariates <- as.data.frame(covariateData$covariates)
+  covariates <- as.data.frame(plpData$covariateData$covariates)
   
-  # Define predictors. 
+  # Define predictors (concept_id + 201 for all time prior of conditions)
   predictor_covariate_ids <- list(
-    `CHF history` = c(45581779),
-    `Hypertension history` = c(45591453, 45548007, 45567162, 45576864, 45562338),
+    `CHF history` = c(45581779201), 
+    `Hypertension history` = c(45591453201, 45548007201, 45567162201, 45576864201, 45562338201),
     `Age >= 75` = c(1002),
-    `Diabetes mellitus history` = c(45576436, 45571656, 45586141, 45566732, 45571663),
-    `Stroke or TIA symptoms previously` = c(45543186, 45548032, 45562092, 45543192)
+    `Diabetes mellitus history` = c(45576436201, 45571656201, 45586141201, 45566732201, 45571663201),
+    `Stroke or TIA symptoms previously` = c(45543186201, 45548032201, 45562092201, 45543192201)
   )
+  # id_list <- unique(covariates$covariateId)
+  # id_list_clean <- ifelse(id_list %% 1000 %in% c(201, 401), id_list %/% 1000, id_list)
+  # paste0(id_list_clean, collapse = ",")
   
   # Reverse lookup: covariateId -> predictor.
   covariate_to_predictor <- unlist(
@@ -126,7 +130,6 @@ computeChads2FromCovariateData <- function(plpData) {
   
   # Add predictor column; NA if not in dictionary.
   covariates$predictor <- covariate_to_predictor[as.character(covariates$covariateId)]
-  # covariates$predictor <- unname(covariates$predictor)
   
   # Convert covariateValue into 0/1 based on threshold.
   covariates <- covariates %>%
@@ -136,7 +139,9 @@ computeChads2FromCovariateData <- function(plpData) {
   
   df_model <- covariates %>%
     group_by(rowId, predictor) %>%
-    summarise(value = max(covariateValue, na.rm = TRUE), .groups = "drop") %>%
+    filter(!is.na(covariateValue)) %>% 
+   summarise(value = covariateValue, .groups = "drop") %>%
+   #  summarise(value = max(covariateValue, na.rm = TRUE), .groups = "drop") %>%
     pivot_wider(
       names_from = predictor,
       values_from = value,
@@ -148,6 +153,7 @@ computeChads2FromCovariateData <- function(plpData) {
   all_predictors <- names(predictor_covariate_ids)
   for (p in all_predictors) {
     if (!p %in% names(df_model)) {
+      print(p)
       df_model[[p]] <- 0
     }
   }
@@ -163,8 +169,8 @@ computeChads2FromCovariateData <- function(plpData) {
     )
   
   # Convert to predicted probability
-  score_to_prob <- c(0 = 0.019, 1 = 0.029, 2 = 0.040, 3 = 0.059, 4 = 0.085, 5 = 0.125, 6 = 0.182)
-  df_model$probs <- score_to_prob[df_model$score]
+  score_to_prob <- c("0" = 0.019, "1" = 0.029, "2" = 0.040, "3" = 0.059, "4" = 0.085, "5" = 0.125, "6" = 0.182)
+  df_model$probs <- as.numeric(score_to_prob[as.character(df_model$score)])
   
   return(df_model[,c("rowId", "score", "probs")])
 }
