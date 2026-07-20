@@ -109,18 +109,19 @@ computeChads2FromCovariateData <- function(plpData) {
   
   covariates <- as.data.frame(plpData$covariateData$covariates)
   
-  # Define predictors (concept_id + 201 for all time prior of conditions)
+  # Define predictors (concept_id + 201 for all time prior of conditions) - note: phenotypes based on mapping table!
   predictor_covariate_ids <- list(
-    `CHF history` = c(45581779201), 
-    `Hypertension history` = c(45591453201, 45548007201, 45567162201, 45576864201, 45562338201),
+    `CHF history` = c(1569178201), # ICD10CM, I50
+    `Hypertension history` = c(35207668201, 1569124201), # ICD10CM, I10, I15
     `Age >= 75` = c(1002),
-    `Diabetes mellitus history` = c(45576436201, 45571656201, 45586141201, 45566732201, 45571663201),
-    `Stroke or TIA symptoms previously` = c(45543186201, 45548032201, 45562092201, 45543192201)
+    `Diabetes mellitus history` = c(1567940201, 1567956201, 1567972201, 45571663201), # ICD10CM/ICD10 E10, E11, E13, E14
+    `Stroke or TIA symptoms previously` = c(1569193201, 45548032201) # ICD10CM/ICD10 I63, I64
   )
+  
   # id_list <- unique(covariates$covariateId)
   # id_list_clean <- ifelse(id_list %% 1000 %in% c(201, 401), id_list %/% 1000, id_list)
   # paste0(id_list_clean, collapse = ",")
-  
+
   # Reverse lookup: covariateId -> predictor.
   covariate_to_predictor <- unlist(
     lapply(names(predictor_covariate_ids), function(p) {
@@ -140,8 +141,7 @@ computeChads2FromCovariateData <- function(plpData) {
   df_model <- covariates %>%
     group_by(rowId, predictor) %>%
     filter(!is.na(covariateValue)) %>% 
-   summarise(value = covariateValue, .groups = "drop") %>%
-   #  summarise(value = max(covariateValue, na.rm = TRUE), .groups = "drop") %>%
+    summarise(value = max(covariateValue, na.rm = TRUE), .groups = "drop") %>%
     pivot_wider(
       names_from = predictor,
       values_from = value,
