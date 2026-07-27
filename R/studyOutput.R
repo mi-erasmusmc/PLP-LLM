@@ -1,5 +1,10 @@
 library(ggplot2)
 
+studyPlotPalette <- c(
+  "#0072B2", "#E69F00", "#009E73", "#D55E00",
+  "#CC79A7", "#56B4E9", "#F0E442", "#000000"
+)
+
 studyOutput <- function(outputFolder) {
 
   runFolders <- list.dirs(outputFolder, recursive = FALSE, full.names = TRUE)
@@ -12,6 +17,7 @@ studyOutput <- function(outputFolder) {
   runSummaries <- list()
   featureSets <- list()
   featureUniverses <- list()
+  curveSets <- list()
 
   for (runFolder in runFolders) {
     runSummary <- summariseRun(file.path(runFolder, "plpResult", "runPlp.rds"))
@@ -22,6 +28,7 @@ studyOutput <- function(outputFolder) {
     runSummaries[[length(runSummaries) + 1]] <- runSummary$metrics
     featureSets[[length(featureSets) + 1]] <- runSummary$selectedFeatures
     featureUniverses[[length(featureUniverses) + 1]] <- runSummary$featureUniverse
+    curveSets[[length(curveSets) + 1]] <- runSummary$curveData
   }
 
   runSummaryData <- do.call(rbind, runSummaries)
@@ -30,9 +37,12 @@ studyOutput <- function(outputFolder) {
   # Output metrics
   summaryPath <- file.path(outputFolder, "studySummary.csv")
   write.csv(summaryData, summaryPath, row.names = FALSE)
-  
+
   # Output figures
   saveSummaryPlots(summaryData, outputFolder)
+
+  curveData <- do.call(rbind, curveSets)
+  saveCurvePlots(curveData, outputFolder)
 }
 
 summariseRun <- function(rdsFile) {
@@ -72,6 +82,16 @@ summariseRun <- function(rdsFile) {
   predictions$outcome <- as.integer(predictions$outcomeCount > 0)
   thresholdInfo <- bestThreshold(predictions$outcome, predictions$value)
   fairnessData <- fairnessBySex(predictions, thresholdInfo$threshold)
+  curveData <- data.frame(
+    model = splitInfo$model,
+    plp = splitInfo$plp,
+    covariates = splitInfo$covariates,
+    iteration = splitInfo$iteration,
+    outcome = predictions$outcome,
+    score = predictions$value,
+    stringsAsFactors = FALSE
+  )
+  curveData <- curveData[!is.na(curveData$outcome) & is.finite(curveData$score), , drop = FALSE]
 
   covariateImportance <- readCovariateImportance(dirname(rdsFile))
   if (is.null(covariateImportance)) {
@@ -108,7 +128,8 @@ summariseRun <- function(rdsFile) {
       stringsAsFactors = FALSE
     ),
     selectedFeatures = selectedFeatures,
-    featureUniverse = featureUniverse
+    featureUniverse = featureUniverse,
+    curveData = curveData
   )
 }
 
@@ -181,8 +202,15 @@ saveSummaryPlots <- function(summaryData, outputFolder) {
   }
 
   cowplotAvailable <- requireNamespace("cowplot", quietly = TRUE)
-  plotOrder <- paste(summaryData$model, summaryData$plp, summaryData$covariates, sep = " | ")
-  summaryData$displayLabel <- factor(plotOrder, levels = plotOrder)
+  modelLabel <- ifelse(
+    is.na(summaryData$model) | summaryData$model == "",
+    "Unknown",
+    summaryData$model
+  )
+  summaryData$modelLabel <- factor(modelLabel, levels = unique(modelLabel))
+
+  comparisonLabel <- paste(summaryData$plp, summaryData$covariates, sep = " | ")
+  summaryData$comparisonLabel <- factor(comparisonLabel, levels = unique(comparisonLabel))
 
   performanceData <- stackMetricsWithError(
     summaryData,
@@ -202,6 +230,8 @@ saveSummaryPlots <- function(summaryData, outputFolder) {
   } else {
     performancePlot <- NULL
   }
+  
+
 
   fairnessData <- stackMetricsWithError(
     summaryData,
@@ -212,7 +242,7 @@ saveSummaryPlots <- function(summaryData, outputFolder) {
   if (nrow(fairnessData) > 0) {
     fairnessPlot <- plotMetricPanel(
       fairnessData,
-      title = "Fairness metrics",
+      title = "Fairness",
       ylab = "Rate",
       lowerBound = -1,
       upperBound = 1
@@ -231,7 +261,7 @@ saveSummaryPlots <- function(summaryData, outputFolder) {
   if (nrow(consistencyData) > 0) {
     consistencyPlot <- plotMetricPanel(
       consistencyData,
-      title = "Consistency across iterations",
+      title = "Consistency",
       ylab = "Variation",
       lowerBound = 0,
       upperBound = NULL
@@ -250,7 +280,7 @@ saveSummaryPlots <- function(summaryData, outputFolder) {
   if (nrow(interpretabilityData) > 0) {
     interpretabilityPlot <- plotMetricPanel(
       interpretabilityData,
-      title = "Interpretability and feature stability",
+      title = "Interpretability",
       ylab = "Value",
       lowerBound = -1,
       upperBound = NULL
@@ -269,22 +299,249 @@ saveSummaryPlots <- function(summaryData, outputFolder) {
   invisible(NULL)
 }
 
+saveCurvePlots <- function(curveData, outputFolder) {
+  if (is.null(curveData) || nrow(curveData) == 0) {
+    return(invisible(NULL))
+  }
+
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    return(invisible(NULL))
+  }
+
+  modelLabel <- ifelse(
+    is.na(curveData$model) | curveData$model == "",
+    "Unknown",
+    curveData$model
+  )
+  curveData$modelLabel <- factor(modelLabel, levels = unique(modelLabel))
+
+  comparisonLabel <- paste(curveData$plp, curveData$covariates, sep = " | ")
+  curveData$comparisonLabel <- factor(comparisonLabel, levels = unique(comparisonLabel))
+
+  paletteValues <- resolveModelPalette(levels(curveData$modelLabel))
+
+  rocData <- buildRocCurveData(curveData)
+  if (nrow(rocData) > 0) {
+    rocPlot <- ggplot2::ggplot(rocData, ggplot2::aes(x = fpr, y = tpr, color = modelLabel, group = modelLabel)) +
+      ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey70") +
+      ggplot2::geom_line(linewidth = 0.8) +
+      ggplot2::coord_equal(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
+      ggplot2::scale_color_manual(values = paletteValues, drop = FALSE) +
+      ggplot2::labs(title = "AUC curve", x = "False positive rate", y = "True positive rate", color = "Model") +
+      ggplot2::theme_minimal()
+
+    if (length(unique(rocData$comparisonLabel)) > 1) {
+      rocPlot <- rocPlot + ggplot2::facet_wrap(~comparisonLabel)
+    }
+
+    ggplot2::ggsave(file.path(outputFolder, "studyAucCurve.png"), rocPlot, width = 8, height = 5, dpi = 300)
+  }
+
+  prData <- buildPrCurveData(curveData)
+  if (nrow(prData) > 0) {
+    prPlot <- ggplot2::ggplot(prData, ggplot2::aes(x = recall, y = precision, color = modelLabel, group = modelLabel)) +
+      ggplot2::geom_line(linewidth = 0.8) +
+      ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
+      ggplot2::scale_color_manual(values = paletteValues, drop = FALSE) +
+      ggplot2::labs(title = "AUPRC curve", x = "Recall", y = "Precision", color = "Model") +
+      ggplot2::theme_minimal()
+
+    if (length(unique(prData$comparisonLabel)) > 1) {
+      prPlot <- prPlot + ggplot2::facet_wrap(~comparisonLabel)
+    }
+
+    ggplot2::ggsave(file.path(outputFolder, "studyAuprcCurve.png"), prPlot, width = 8, height = 5, dpi = 300)
+  }
+
+  calibrationData <- buildCalibrationData(curveData)
+  if (nrow(calibrationData) > 0) {
+    calibrationPlot <- ggplot2::ggplot(calibrationData, ggplot2::aes(x = predicted, y = observed, color = modelLabel, group = modelLabel)) +
+      ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey70") +
+      ggplot2::geom_line(linewidth = 0.8) +
+      ggplot2::geom_point(size = 1.8) +
+      ggplot2::coord_equal(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
+      ggplot2::scale_color_manual(values = paletteValues, drop = FALSE) +
+      ggplot2::labs(title = "Calibration curve", x = "Mean predicted risk", y = "Observed event rate", color = "Model") +
+      ggplot2::theme_minimal()
+
+    if (length(unique(calibrationData$comparisonLabel)) > 1) {
+      calibrationPlot <- calibrationPlot + ggplot2::facet_wrap(~comparisonLabel)
+    }
+
+    ggplot2::ggsave(file.path(outputFolder, "studyCalibrationCurve.png"), calibrationPlot, width = 8, height = 5, dpi = 300)
+  }
+
+  invisible(NULL)
+}
+
+buildRocCurveData <- function(curveData) {
+  splitData <- split(curveData, interaction(curveData$modelLabel, curveData$comparisonLabel, drop = TRUE))
+  rows <- lapply(splitData, function(groupData) {
+    if (nrow(groupData) == 0 || length(unique(groupData$outcome)) < 2) {
+      return(NULL)
+    }
+
+    curve <- binaryCurvePoints(groupData$outcome, groupData$score)
+    if (nrow(curve) == 0) {
+      return(NULL)
+    }
+
+    data.frame(
+      modelLabel = groupData$modelLabel[1],
+      comparisonLabel = groupData$comparisonLabel[1],
+      fpr = curve$fpr,
+      tpr = curve$tpr,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows) == 0) {
+    return(data.frame())
+  }
+  do.call(rbind, rows)
+}
+
+buildPrCurveData <- function(curveData) {
+  splitData <- split(curveData, interaction(curveData$modelLabel, curveData$comparisonLabel, drop = TRUE))
+  rows <- lapply(splitData, function(groupData) {
+    if (nrow(groupData) == 0 || sum(groupData$outcome == 1) == 0) {
+      return(NULL)
+    }
+
+    curve <- binaryCurvePoints(groupData$outcome, groupData$score)
+    if (nrow(curve) == 0) {
+      return(NULL)
+    }
+
+    precision <- ifelse(curve$tp + curve$fp > 0, curve$tp / (curve$tp + curve$fp), 1)
+    data.frame(
+      modelLabel = groupData$modelLabel[1],
+      comparisonLabel = groupData$comparisonLabel[1],
+      recall = curve$tpr,
+      precision = precision,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows) == 0) {
+    return(data.frame())
+  }
+  do.call(rbind, rows)
+}
+
+buildCalibrationData <- function(curveData, bins = 10) {
+  splitData <- split(curveData, interaction(curveData$modelLabel, curveData$comparisonLabel, drop = TRUE))
+  rows <- lapply(splitData, function(groupData) {
+    if (nrow(groupData) == 0) {
+      return(NULL)
+    }
+
+    clippedScore <- pmin(pmax(groupData$score, 0), 1)
+    binIndex <- cut(clippedScore, breaks = seq(0, 1, length.out = bins + 1), include.lowest = TRUE)
+    stats <- stats::aggregate(
+      cbind(predicted = clippedScore, observed = groupData$outcome),
+      by = list(bin = binIndex),
+      FUN = mean
+    )
+
+    if (nrow(stats) == 0) {
+      return(NULL)
+    }
+
+    data.frame(
+      modelLabel = groupData$modelLabel[1],
+      comparisonLabel = groupData$comparisonLabel[1],
+      predicted = stats$predicted,
+      observed = stats$observed,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows) == 0) {
+    return(data.frame())
+  }
+  do.call(rbind, rows)
+}
+
+binaryCurvePoints <- function(outcome, score) {
+  outcome <- as.integer(outcome)
+  valid <- !is.na(outcome) & !is.na(score)
+  outcome <- outcome[valid]
+  score <- score[valid]
+  if (length(outcome) == 0) {
+    return(data.frame())
+  }
+
+  positives <- sum(outcome == 1)
+  negatives <- sum(outcome == 0)
+  if (positives == 0 || negatives == 0) {
+    return(data.frame())
+  }
+
+  orderIndex <- order(score, decreasing = TRUE)
+  sortedOutcome <- outcome[orderIndex]
+  sortedScore <- score[orderIndex]
+  cumulativeTp <- cumsum(sortedOutcome == 1)
+  cumulativeFp <- cumsum(sortedOutcome == 0)
+  changePoints <- c(which(diff(sortedScore) != 0), length(sortedScore))
+
+  tp <- c(0, cumulativeTp[changePoints])
+  fp <- c(0, cumulativeFp[changePoints])
+
+  data.frame(
+    tp = tp,
+    fp = fp,
+    tpr = tp / positives,
+    fpr = fp / negatives,
+    stringsAsFactors = FALSE
+  )
+}
+
+resolveModelPalette <- function(modelLevels) {
+  if (length(modelLevels) <= length(studyPlotPalette)) {
+    paletteValues <- studyPlotPalette[seq_along(modelLevels)]
+  } else {
+    paletteValues <- grDevices::colorRampPalette(studyPlotPalette)(length(modelLevels))
+  }
+  names(paletteValues) <- modelLevels
+  paletteValues
+}
+
 plotMetricPanel <- function(plotData, title, ylab, lowerBound = NULL, upperBound = NULL) {
   panelLimits <- panelLimits(plotData$value, plotData$error, lowerBound, upperBound)
   position <- ggplot2::position_dodge(width = 0.8)
+  modelLevels <- levels(plotData$modelLabel)
+  if (is.null(modelLevels)) {
+    modelLevels <- unique(as.character(plotData$modelLabel))
+  }
+  paletteValues <- resolveModelPalette(modelLevels)
 
-  ggplot2::ggplot(plotData, ggplot2::aes(x = displayLabel, y = value, fill = metric)) +
+  plot <- ggplot2::ggplot(plotData, ggplot2::aes(x = metric, y = value, fill = modelLabel)) +
     ggplot2::geom_col(position = position, width = 0.7) +
     ggplot2::geom_errorbar(
-      ggplot2::aes(ymin = pmax(panelLimits[1], value - error), ymax = pmin(panelLimits[2], value + error)),
+      ggplot2::aes(
+        ymin = pmax(panelLimits[1], value - error),
+        ymax = pmin(panelLimits[2], value + error),
+        group = modelLabel
+      ),
       position = position,
       width = 0.2,
       na.rm = TRUE
     ) +
+    ggplot2::scale_fill_manual(values = paletteValues, drop = FALSE) +
     ggplot2::scale_y_continuous(limits = panelLimits, expand = ggplot2::expansion(mult = c(0, 0.05))) +
-    ggplot2::labs(title = title, x = NULL, y = ylab, fill = "Metric") +
+    ggplot2::labs(title = title, x = "Metric", y = ylab, fill = "Model") +
     ggplot2::theme_minimal() +
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1))
+
+  if (length(unique(plotData$comparisonLabel)) > 1) {
+    plot <- plot + ggplot2::facet_wrap(~comparisonLabel)
+  }
+
+  plot
 }
 
 stackMetricsWithError <- function(summaryData, columnNames, errorNames, labels) {
@@ -304,7 +561,8 @@ stackMetricsWithError <- function(summaryData, columnNames, errorNames, labels) 
     }
 
     data.frame(
-      displayLabel = summaryData$displayLabel,
+      modelLabel = summaryData$modelLabel,
+      comparisonLabel = summaryData$comparisonLabel,
       metric = metricLabel,
       value = summaryData[[valueColumn]],
       error = ifelse(is.na(errorValues), 0, errorValues),
@@ -313,6 +571,8 @@ stackMetricsWithError <- function(summaryData, columnNames, errorNames, labels) 
   })
 
   stacked <- do.call(rbind, rows)
+  metricOrder <- labels[match(availableColumns, columnNames)]
+  stacked$metric <- factor(stacked$metric, levels = metricOrder)
   stacked[!is.na(stacked$value), , drop = FALSE]
 }
 
