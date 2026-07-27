@@ -41,6 +41,14 @@ runModels <- function(plp, plpData, model, iteration, outputFolder) {
       model_settings <- list(analysisId=paste0("LASSO_", plp),
                              analysisName=paste0("LASSO logistic regression"),
                              modelSettings=PatientLevelPrediction::setLassoLogisticRegression(variance = 0.01))
+    } else if (model == "RandomForest") { # python function
+      model_settings <- list(analysisId=paste0("RandomForest_", plp),
+                                            analysisName=paste0("Random forest"),
+                                            modelSettings=PatientLevelPrediction::setRandomForest(ntrees=list(10, 50, 100), maxDepth=list(2, 4, 8)))
+    } else if (model == "XGBoost") { # r function
+      model_settings <- list(analysisId=paste0("XGBoost_", plp),
+                                       analysisName=paste0("Gradient boosting machine"),
+                                       modelSettings=PatientLevelPrediction::setGradientBoostingMachine(ntrees=c(10, 50, 100), maxDepth=c(2, 4, 8)))
     }
   }
   
