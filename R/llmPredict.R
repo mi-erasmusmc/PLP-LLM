@@ -88,7 +88,7 @@ predictLLM <- function(plpModel, data, cohort){
     mutate(name=ifelse(name=="age in years", paste0(name, " = ",covariateValue), name))
   
   covariates_texts<-covariates_edit_names %>%
-    mutate(type=ifelse(analysisId<100,"## DEMOGRAPHICS", "## CLINICAL EVENTS")) %>%
+    mutate(type=ifelse(analysisId<100,"### DEMOGRAPHICS", "### CLINICAL EVENTS")) %>%
     group_by(rowId, type) %>%
     summarise(text=paste0(name, collapse = "\n")) %>%
     mutate(text=paste0(type, ":\n", text)) %>%
@@ -96,7 +96,7 @@ predictLLM <- function(plpModel, data, cohort){
     group_by(rowId) %>%
     summarise(text=paste0(text, collapse = "\n\n")) %>%
     ungroup() %>%
-    mutate(text=paste0("# CLNICAL DATA\n", text))
+    mutate(text=paste0("## CLNICAL DATA\n", text))
   
   chat<-chat_openai(
     model = plpModel$modelDesign$modelSettings$param$model_name,
