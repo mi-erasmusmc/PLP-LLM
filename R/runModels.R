@@ -10,27 +10,38 @@ runModels <- function(plp, plpData, model, iteration, outputFolder) {
                                       modelSettings=setCHADS2())
 
   } else if (startsWith(model, "LLM_")) { # large language models
-    systemprompt_file<-paste0("systemprompt_", "Dementia",".md")
+    systemprompt_file<-paste0("systemprompt_", "StrokeInAF(CHADS2)_v2",".md")
     print(systemprompt_file) # just to be certain during run time
     systemprompt<-readLines(file.path(root, "inst", "prompts", systemprompt_file))
-    format_typeobject<-type_object(reasoning = type_string(),
-                                   probability = type_number()) # format for the structured output, it cannot do anything else then return a single number and a string.
+    format_typeobject<<-type_object(reasoning = type_string(required = T),
+                                   top_5_features = type_array(
+                                     items = type_object(
+                                       feature_name=type_string(),
+                                       positive=type_boolean()
+                                       ),
+                                    required = T
+                                     ),
+                                   probability = type_number(required = T)) # format for the structured output, it cannot do anything else then return a single number and a string.
+    assign("format_typeobject",format_typeobject, envir = .GlobalEnv)
     
     if (model == "LLM_Qwen3") {
       model_settings <- list(analysisId=paste0("LLM_qwen_", plp),
-                             analysisName=paste0("LLM qwen"),
-                             modelSettings=setLLM(model_name="qwen3-30b-a3b",
+                             analysisName=paste0("LLM qwen3"),
+                             modelSettings=setLLM(model_name="qwen3:30b",
                                                   systemprompt = systemprompt,
-                                                  format_typeobject = format_typeobject,
+                                                  format_typeobject = TRUE,
+                                                  temperature = 0.2,
+                                                  tempsavelocation = paste0(outputFolder,"/LLM_qwen3_temp_it",iteration),
                                                   parallel = TRUE))
       
       
-    } else if (model == "LLM_MedGemma") {
-      model_settings <- list(analysisId=paste0("LLM_medgemma_", plp),
-                             analysisName=paste0("LLM medgemma"),
-                             modelSettings=setLLM(model_name="medgemma-27b-text-it",
+    } else if (model == "LLM_Qwen3.8") {
+      model_settings <- list(analysisId=paste0("LLM_qwen_", plp),
+                             analysisName=paste0("LLM qwen3.8"),
+                             modelSettings=setLLM(model_name="qwen3.8",
                                                   systemprompt = systemprompt,
-                                                  format_typeobject = format_typeobject,
+                                                  format_typeobject = TRUE,
+                                                  temperature = 0.2,
                                                   parallel = TRUE))
     }
   
@@ -43,12 +54,12 @@ runModels <- function(plp, plpData, model, iteration, outputFolder) {
                              modelSettings=PatientLevelPrediction::setLassoLogisticRegression(variance = 0.01))
     } else if (model == "RandomForest") { # python function
       model_settings <- list(analysisId=paste0("RandomForest_", plp),
-                                            analysisName=paste0("Random forest"),
-                                            modelSettings=PatientLevelPrediction::setRandomForest(ntrees=list(10, 50, 100), maxDepth=list(2, 4, 8)))
+                             analysisName=paste0("Random forest"),
+                             modelSettings=PatientLevelPrediction::setRandomForest(ntrees=list(10, 50, 100), maxDepth=list(2, 4, 8)))
     } else if (model == "XGBoost") { # r function
       model_settings <- list(analysisId=paste0("XGBoost_", plp),
-                                       analysisName=paste0("Gradient boosting machine"),
-                                       modelSettings=PatientLevelPrediction::setGradientBoostingMachine(ntrees=c(10, 50, 100), maxDepth=c(2, 4, 8)))
+                             analysisName=paste0("Gradient boosting machine"),
+                             modelSettings=PatientLevelPrediction::setGradientBoostingMachine(ntrees=c(10, 50, 100), maxDepth=c(2, 4, 8)))
     }
   }
   
