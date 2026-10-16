@@ -20,8 +20,8 @@ createPredictors <- function(plp, covariates, databaseDetails, outputFolder) {
   } else if (covariates == "GroupedFeatures") {
     covariateSettingList <- FeatureExtraction::createCovariateSettings(useDemographicsGender = T,
                                                                        useDemographicsAge = T,
-                                                                       useConditionEraAnyTimePrior = T,
-                                                                       useDrugEraAnyTimePrior = T) #ingredients only
+                                                                       useConditionGroupEraLongTerm = T,
+                                                                       useDrugEraLongTerm = T) #ingredients only
   }
   
   # Selected covariates

@@ -1,9 +1,9 @@
 ### Settings
-test <- TRUE
+test <- FALSE
 rerun <- FALSE
 plptasks <- if (test) c("Eunomia") else c("CHADS2")
-covariates <- "AgeSex" # "GroupedFeatures"
-iterations <- 2
+covariates <- "GroupedFeatures"
+iterations <- 5 #2
 
 ### Libraries & paths
 root <- getwd()
@@ -20,6 +20,7 @@ library(rlang)
 source(file.path(root, "R", "taskSpecifications.R"))
 source(file.path(root, "R", "generateCohorts.R"))
 source(file.path(root, "R", "createPredictors.R"))
+source(file.path(root, "R", "groupingFunctions.R"))
 source(file.path(root, "R", "runModels.R"))
 source(file.path(root, "R", "existingModels.R"))
 source(file.path(root, "R", "llmPredict.R"))
@@ -68,7 +69,9 @@ for (plp in plptasks) {
     outputFolder = outputFolder
   )
   
-  models <- c("LASSO", "XGBoost") # "ExistingScore", "LASSO", "LLM_Qwen3"
+  #models <- c("LASSO", "XGBoost","ExistingScore") # "ExistingScore", "LASSO", "LLM_Qwen3"
+  models <- c("LLM_Qwen3")
+  #models <- c("LASSO")
   
   for (m in models) {
     iterations_m <- ifelse(m != "ExistingScore", iterations, 1)
@@ -86,5 +89,14 @@ for (plp in plptasks) {
 }
 
 ### Evaluation metrics & output figures
+outputFolder <- "/Users/amarkus/Git/Projects/PLP-LLM/output/2026-10-15"
 studyOutput(outputFolder)
+
+### Check PLP shiny
+# runFolders <- list.dirs(outputFolder, recursive = FALSE, full.names = TRUE)
+# resultFolder <- file.path(runFolders[2], "plpResult")
+# plpResult <- PatientLevelPrediction::loadPlpResult(resultFolder)
+
+# PatientLevelPrediction::plotPlp(plpResult = plpResult, saveLocation = outputFolder)
+# PatientLevelPrediction::viewPlp(runPlp = plpResult)
 
