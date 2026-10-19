@@ -5,7 +5,7 @@ studyPlotPalette <- c(
   "#CC79A7", "#56B4E9", "#F0E442", "#000000"
 )
 
-studyOutput <- function(outputFolder) {
+studyOutput <- function(outputFolder, regeneratePlpPlots = TRUE) {
   runFolders <- list.dirs(outputFolder, recursive = FALSE, full.names = TRUE)
   runFolders <- runFolders[file.exists(file.path(runFolders, "plpResult", "runPlp.rds"))]
   
@@ -16,7 +16,7 @@ studyOutput <- function(outputFolder) {
   }
   
   # Collect output
-  summaryResults <- summarizeResults(runFolders)
+  summaryResults <- summarizeResults(runFolders, regeneratePlpPlots)
   saveRDS(summaryResults, file.path(outputFolder, "summaryResults.rds"))
   
   # Create plots
@@ -25,13 +25,15 @@ studyOutput <- function(outputFolder) {
 }
 
 # Collect output helpers
-summarizeResults <- function(runFolders) {
+summarizeResults <- function(runFolders, regeneratePlpPlots = TRUE) {
   metricsAll <- list()
   curvesAll <- list()
   featureImportanceAll <- list()
+  localFeatureImportanceAll <- list()
+  explanationPatientsAll <- list()
   
   for (runFolder in runFolders) {
-    runResult <- summariseRun(runFolder)
+    runResult <- summariseRun(runFolder, regeneratePlpPlots)
     if (is.null(runResult)) {
       next
     }
@@ -39,6 +41,8 @@ summarizeResults <- function(runFolders) {
     metricsAll[[length(metricsAll) + 1]] <- runResult$metrics
     curvesAll[[length(curvesAll) + 1]] <- runResult$curves
     featureImportanceAll[[length(featureImportanceAll) + 1]] <- runResult$featureImportance
+    localFeatureImportanceAll[[length(localFeatureImportanceAll) + 1]] <- runResult$localFeatureImportance
+    explanationPatientsAll[[length(explanationPatientsAll) + 1]] <- runResult$explanationPatients
   }
   
   metricsAll <- do.call(rbind, metricsAll)
@@ -48,15 +52,17 @@ summarizeResults <- function(runFolders) {
   return(list(
     metricsAll = metricsAll,
     curvesAll = curvesAll,
-    featureImportanceAll = featureImportanceAll
+    featureImportanceAll = featureImportanceAll,
+    localFeatureImportanceAll = dplyr::bind_rows(localFeatureImportanceAll),
+    explanationPatientsAll = dplyr::bind_rows(explanationPatientsAll)
   ))
 }
 
-summariseRun <- function(runFolder) {
+summariseRun <- function(runFolder, regeneratePlpPlots = TRUE) {
   if (!file.exists(runFolder)) return(NULL)
   
   plpResult <- PatientLevelPrediction::loadPlpResult(file.path(runFolder, "plpResult"))
-  PatientLevelPrediction::plotPlp(plpResult = plpResult, saveLocation = runFolder)
+  if (regeneratePlpPlots) PatientLevelPrediction::plotPlp(plpResult = plpResult, saveLocation = runFolder)
   
   analysisName <- plpResult$analysisRef$analysisName
   
@@ -133,6 +139,68 @@ summariseRun <- function(runFolder) {
   )
   
   covariateImportance <- plpResult$model$covariateImportance
+  localFeatureImportance <- NULL
+  explanationPatients <- NULL
+  
+  if(str_detect(runFolder, "LLM_")){
+    pred<-predictions %>%
+      select(rowId, top_5_features) %>%
+      unnest(cols = c(top_5_features)) %>%
+      mutate(feature_name=trimws(feature_name))
+    
+    covariates<-plpResult$covariateSummary %>%
+      rowwise() %>%
+      mutate(covariateName=ifelse(str_detect(covariateName,"index: "),str_split(covariateName,"index: ")[[1]][2],covariateName)) %>%
+      select(covariateId, covariateName)
+    
+    library(fuzzyjoin)
+    ### match the LLM feature to the orginal list
+    merged_df <- stringdist_join(
+      pred, 
+      covariates, 
+      by = c("feature_name" = "covariateName"), # Columns to compare
+      mode = "left",                     # Type of join: left, inner, full, right
+      method = "jw",                     # Distance metric (e.g., "jw" = Jaro-Winkler)
+      max_dist = 0.25,                   # Maximum distance threshold for a match
+      distance_col = "dist_score"        # Optional: creates a column showing the distance
+    )
+    merged_df_n <- merged_df %>%
+      group_by(rowId, feature_name, positive) %>%
+      slice_min(order_by = dist_score) %>%
+      mutate(covariateName=ifelse(
+        is.na(covariateName), 
+        covariates$covariateName[which(stringr::str_detect(covariates$covariateName, dplyr::first(feature_name)))][1], 
+        covariateName)) %>%
+      filter(!is.na(covariateName))
+    
+    # Carry the existing name matching forward, resolving tied matches to one ID.
+    matched <- merged_df_n |>
+      dplyr::ungroup() |>
+      dplyr::select(-covariateId) |>
+      dplyr::left_join(covariates, by = "covariateName") |>
+      dplyr::arrange(dist_score, covariateId) |>
+      dplyr::distinct(rowId, feature_name, positive, .keep_all = TRUE)
+    validIds <- unique(pred$rowId[!is.na(pred$feature_name) & nzchar(pred$feature_name)])
+    explanationPatients <- data.frame(rowId = validIds) |>
+      dplyr::mutate(model = splitInfo$model, plp = splitInfo$plp,
+                    covariates = splitInfo$covariates, iteration = splitInfo$iteration)
+    localFeatureImportance <- matched |>
+      dplyr::select(rowId, covariateId, covariateName, positive, feature_name, dist_score) |>
+      dplyr::mutate(model = splitInfo$model, plp = splitInfo$plp,
+                    covariates = splitInfo$covariates, iteration = splitInfo$iteration)
+    counts <- matched |>
+      dplyr::distinct(rowId, covariateId) |>
+      dplyr::count(covariateId, name = "mentionCount")
+    covariateImportance <- covariates |>
+      dplyr::ungroup() |>
+      dplyr::distinct(covariateId, .keep_all = TRUE) |>
+      dplyr::left_join(counts, by = "covariateId") |>
+      dplyr::mutate(covariateValue = if (length(validIds) > 0)
+        dplyr::coalesce(mentionCount, 0L) / length(validIds) else NA_real_)
+    explanationPatients$matchedFeatures <- vapply(validIds, function(id)
+      length(unique(matched$covariateId[matched$rowId == id])), integer(1))
+  }
+  
   nFeatures <- if (is.null(covariateImportance)) 0 else nrow(covariateImportance)
   
   featureImportance <- data.frame(
@@ -145,8 +213,10 @@ summariseRun <- function(runFolder) {
     covariateValue = as.numeric(covariateImportance$covariateValue),
     stringsAsFactors = FALSE
   )
+  featureImportance$importanceType <- rep(if (is.null(explanationPatients)) "coefficient" else "mention_frequency", nrow(featureImportance))
   
-  list(metrics = metrics, curves = curves, featureImportance = featureImportance)
+  list(metrics = metrics, curves = curves, featureImportance = featureImportance,
+       localFeatureImportance = localFeatureImportance, explanationPatients = explanationPatients)
 }
 
 confusionRates <- function(data, threshold) {
@@ -190,6 +260,7 @@ plotResults <- function(summaryResults, outputFolder) {
   # Interpretability
   stabilityPlot <- createStabilityPlot(summaryData, outputFolder)
   featureHeatmap <- createFeatureHeatmap(summaryData, outputFolder)
+  createExplanationConsistencyPlot(summaryData, outputFolder)
   
   # Create overview of selected plots
   plots <- list(performancePlot, consistencyPlot, fairnessPlot, stabilityPlot)
@@ -527,63 +598,120 @@ createFairnessPlot <- function(summaryResults, outputFolder) {
   plot
 }
 
-createStabilityPlot <- function(summaryResults, outputFolder) {
-  featureImportance <- summaryResults$featureImportanceAll
- 
-  medianSelected <- featureImportance |>
-    dplyr::group_by(plp, model, iteration) |>
-    dplyr::summarise(n_selected = sum(abs(covariateValue) > 0), .groups = "drop") |>
-    dplyr::group_by(plp, model) |>
-    dplyr::summarise(median_selected_features = stats::median(n_selected, na.rm = TRUE), n_iterations = dplyr::n(), .groups = "drop")
-  stabilityData <- featureImportance |>
-    dplyr::group_by(plp, model) |>
-    dplyr::group_modify(~{
-      covariateMatrix <- stats::xtabs(covariateValue ~ iteration + covariateId, data = .x)
-      selectedMatrix <- ifelse(abs(covariateMatrix) > 0, 1, 0)
-      data.frame(stability_nogueira = nogueiraStability(selectedMatrix))
-    }) |>
-    dplyr::ungroup()
-  
-  interpretabilitySummary <- dplyr::left_join(medianSelected, stabilityData, by = c("plp", "model")) |>
-    dplyr::mutate(stability_plot = dplyr::if_else(is.na(stability_nogueira), 0, stability_nogueira))
 
-  plot <- ggplot2::ggplot(interpretabilitySummary, ggplot2::aes(x = model, y = stability_plot, fill = model)) +
-    ggplot2::geom_col(width = 0.7, na.rm = TRUE) +
-    ggplot2::geom_text(ggplot2::aes(label = paste0("Median # features: ", median_selected_features)), vjust = -0.4, size = 3, na.rm = TRUE) +
-    ggplot2::facet_wrap(~plp) +
-    ggplot2::scale_fill_manual(values = studyPlotPalette, drop = FALSE) +
-    ggplot2::coord_cartesian(ylim = c(0, 1)) +
-    ggplot2::labs(title = "Interpretability", x = "Model", y = "Nogueira stability") +
+# Select a common, prespecified number of leading features per run.
+# Zero-frequency features are never promoted merely to fill K.
+selectLeadingFeatures <- function(features, topK = 20) {
+  if (!"importanceType" %in% names(features)) features$importanceType <- "coefficient"
+  features |>
+    dplyr::group_by(plp, covariates, model, iteration) |>
+    dplyr::arrange(dplyr::desc(abs(covariateValue)), covariateId, .by_group = TRUE) |>
+    dplyr::mutate(selected = is.finite(covariateValue) & abs(covariateValue) > 0 &
+                    dplyr::row_number() <= topK) |>
+    dplyr::ungroup()
+}
+
+createStabilityPlot <- function(summaryResults, outputFolder, topK = 20) {
+  features <- selectLeadingFeatures(summaryResults$featureImportanceAll, topK)
+  stability <- features |>
+    dplyr::group_by(plp, covariates, model) |>
+    dplyr::group_modify(~{
+      # Retain zero columns and runs with no selected features.
+      iterations <- sort(unique(.x$iteration))
+      ids <- sort(unique(as.character(.x$covariateId)))
+      m <- matrix(0, length(iterations), length(ids))
+      usable <- is.finite(.x$covariateValue)
+      if (any(!usable)) return(data.frame(stability = NA_real_, medianSelected = NA_real_))
+      m[cbind(match(.x$iteration, iterations), match(as.character(.x$covariateId), ids))] <- as.integer(.x$selected)
+      data.frame(stability = nogueiraStability(m),
+                 medianSelected = stats::median(rowSums(m)))
+    }) |> dplyr::ungroup()
+  utils::write.csv(stability, file.path(outputFolder, "interpretability_stability.csv"), row.names = FALSE)
+  plot <- ggplot2::ggplot(stability, ggplot2::aes(model, stability, fill = model)) +
+    ggplot2::geom_col(na.rm = TRUE) +
+    ggplot2::geom_text(ggplot2::aes(y = dplyr::coalesce(stability, 0),
+      label = ifelse(is.na(stability), "Unavailable",
+                     paste0("Median # features: ", medianSelected))), vjust = -0.4, size = 3) +
+    ggplot2::facet_wrap(~plp + covariates) +
+    ggplot2::scale_fill_manual(values = studyPlotPalette) +
+    ggplot2::labs(title = "Population feature stability", x = "Model", y = "Nogueira stability",
+      subtitle = paste0("Top ", topK, " by absolute coefficient (Lasso) or mention frequency (LLM)")) +
     ggplot2::theme_minimal() +
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1), legend.position = "none")
-  ggplot2::ggsave(filename = file.path(outputFolder, "interpretability_stability.png"), plot = plot, width = 8, height = 6, dpi = 300)
+  ggplot2::ggsave(file.path(outputFolder, "interpretability_stability.png"), plot, width = 10, height = 6, dpi = 300)
   plot
 }
 
 createFeatureHeatmap <- function(summaryResults, outputFolder, topN = 20) {
-  featureImportance <- summaryResults$featureImportanceAll
-
-  topVariables <- featureImportance |>
-    dplyr::group_by(plp, covariateId, covariateName) |>
-    dplyr::summarise(mean_abs_importance = mean(abs(covariateValue), na.rm = TRUE), .groups = "drop") |>
-    dplyr::group_by(plp) |>
-    dplyr::slice_max(mean_abs_importance, n = topN, with_ties = FALSE) |>
-    dplyr::ungroup()
-  heatmapData <- featureImportance |>
-    dplyr::semi_join(topVariables, by = c("plp", "covariateId", "covariateName")) |>
-    dplyr::group_by(plp, model, covariateId, covariateName) |>
-    dplyr::summarise(freq_selected = mean(abs(covariateValue) > 0, na.rm = TRUE), .groups = "drop")
-  heatmapData$covariateName <- factor(heatmapData$covariateName, levels = rev(unique(topVariables$covariateName)))
-
-  plot <- ggplot2::ggplot(heatmapData, ggplot2::aes(x = model, y = covariateName, fill = freq_selected)) +
+  features <- summaryResults$featureImportanceAll
+  if (!"importanceType" %in% names(features)) features$importanceType <- "coefficient"
+  # Complete absent run-feature combinations, including sparse Lasso tables.
+  heatmapData <- features |>
+    dplyr::group_by(plp, covariates, model, importanceType) |>
+    dplyr::group_modify(~{
+      ref <- dplyr::distinct(.x, covariateId, covariateName)
+      grid <- merge(data.frame(iteration = unique(.x$iteration)), ref, by = NULL)
+      grid <- dplyr::left_join(grid, .x, by = c("iteration", "covariateId", "covariateName"))
+      grid$covariateValue[is.na(grid$covariateValue) &
+        !grid$iteration %in% .x$iteration[is.na(.x$covariateValue)]] <- 0
+      grid |>
+        dplyr::group_by(covariateId, covariateName) |>
+        dplyr::summarise(frequency = if (all(is.na(covariateValue))) NA_real_ else
+          mean(if (.y$importanceType == "mention_frequency") covariateValue
+               else as.numeric(abs(covariateValue) > 0), na.rm = TRUE), .groups = "drop")
+    }) |> dplyr::ungroup()
+  # Union of each model/configuration top N; incompatible scales are not averaged.
+  top <- heatmapData |>
+    dplyr::group_by(plp, covariates, model) |>
+    dplyr::slice_max(frequency, n = topN, with_ties = FALSE, na_rm = TRUE) |>
+    dplyr::ungroup() |> dplyr::distinct(plp, covariates, covariateId)
+  heatmapData <- heatmapData |>
+    dplyr::semi_join(top, by = c("plp", "covariates", "covariateId")) |>
+    dplyr::mutate(measure = ifelse(importanceType == "mention_frequency",
+      "LLM: proportion of explanations mentioning feature", "Model: proportion of runs selecting feature"))
+  utils::write.csv(heatmapData, file.path(outputFolder, "interpretability_feature_heatmap.csv"), row.names = FALSE)
+  plot <- ggplot2::ggplot(heatmapData, ggplot2::aes(model, covariateName, fill = frequency)) +
     ggplot2::geom_tile(color = "white") +
-    ggplot2::geom_text(ggplot2::aes(label = sprintf("%.2f", freq_selected)), size = 2.8) +
-    ggplot2::facet_wrap(~plp, scales = "free_y") +
-    ggplot2::scale_fill_gradient(low = "white", high = studyPlotPalette[1], limits = c(0, 1)) +
-    ggplot2::labs(title = "Top variable selection frequency", x = "Model", y = "Variable", fill = "Freq selected") +
+    ggplot2::geom_text(ggplot2::aes(label = ifelse(is.na(frequency), "NA", sprintf("%.2f", frequency))), size = 2.8) +
+    ggplot2::facet_wrap(~plp + covariates + measure, scales = "free") +
+    ggplot2::scale_fill_gradient(low = "white", high = studyPlotPalette[1], limits = c(0, 1), na.value = "grey80") +
+    ggplot2::labs(title = "Feature selection and explanation frequency", x = "Model", y = "Feature", fill = "Frequency") +
     ggplot2::theme_minimal() +
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1))
-  ggplot2::ggsave(filename = file.path(outputFolder, "interpretability_feature_heatmap.png"), plot = plot, width = 10, height = 8, dpi = 300)
+  ggplot2::ggsave(file.path(outputFolder, "interpretability_feature_heatmap.png"), plot, width = 12, height = 10, dpi = 300)
+  plot
+}
+
+createExplanationConsistencyPlot <- function(summaryResults, outputFolder) {
+  patients <- summaryResults$explanationPatientsAll
+  local <- summaryResults$localFeatureImportanceAll
+  if (is.null(patients) || nrow(patients) == 0 || is.null(local) || nrow(local) == 0) return(NULL)
+  # Exclude explanations with no matched features; do not count them as empty sets.
+  patients <- dplyr::filter(patients, matchedFeatures > 0)
+  sets <- local |>
+    dplyr::semi_join(patients, by = c("plp", "covariates", "model", "iteration", "rowId")) |>
+    dplyr::group_by(plp, covariates, model, rowId, iteration) |>
+    dplyr::summarise(features = list(unique(as.character(covariateId))), .groups = "drop")
+  consistency <- sets |>
+    dplyr::group_by(plp, covariates, model, rowId) |>
+    dplyr::filter(dplyr::n() >= 2) |>
+    dplyr::summarise(nIterations = dplyr::n(), jaccard = {
+      pairs <- utils::combn(seq_along(features), 2)
+      mean(apply(pairs, 2, function(pair) {
+        a <- features[[pair[1]]]; b <- features[[pair[2]]]
+        length(intersect(a, b)) / length(union(a, b))
+      }))
+    }, .groups = "drop")
+  utils::write.csv(consistency, file.path(outputFolder, "interpretability_patient_consistency.csv"), row.names = FALSE)
+  if (nrow(consistency) == 0) return(NULL)
+  plot <- ggplot2::ggplot(consistency, ggplot2::aes(model, jaccard, fill = model)) +
+    ggplot2::geom_boxplot() + ggplot2::facet_wrap(~plp + covariates) +
+    ggplot2::scale_fill_manual(values = studyPlotPalette) +
+    ggplot2::coord_cartesian(ylim = c(0, 1)) +
+    ggplot2::labs(title = "Same-patient explanation consistency", x = "LLM",
+      y = "Mean pairwise Jaccard overlap", subtitle = "Both risk-increasing and protective mentions; at least two matched explanations") +
+    ggplot2::theme_minimal() + ggplot2::theme(legend.position = "none")
+  ggplot2::ggsave(file.path(outputFolder, "interpretability_patient_consistency.png"), plot, width = 10, height = 6, dpi = 300)
   plot
 }
 
