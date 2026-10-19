@@ -9,6 +9,8 @@ studyOutput <- function(outputFolder) {
   runFolders <- list.dirs(outputFolder, recursive = FALSE, full.names = TRUE)
   runFolders <- runFolders[file.exists(file.path(runFolders, "plpResult", "runPlp.rds"))]
   
+  runFolders <- runFolders[-grep("XGBoost", runFolders)] # Fix to remove XGBoost results for MIE abstract.
+
   if (length(runFolders) == 0) {
     stop("studyOutput: no PLP results found in ", outputFolder)
   }
@@ -59,6 +61,7 @@ summariseRun <- function(runFolder) {
   analysisName <- plpResult$analysisRef$analysisName
   
   analysisId <- plpResult$analysisRef$analysisId
+  analysisId <- sub("^LLM_qwen_", "LLMqwen_", analysisId) # Fix to get output from LLM.
   parts <- strsplit(analysisId, "_", fixed = TRUE)[[1]]
   splitInfo <- list(model = parts[1], plp = parts[2], covariates = parts[3], iteration = as.integer(parts[4]))
   
@@ -130,11 +133,13 @@ summariseRun <- function(runFolder) {
   )
   
   covariateImportance <- plpResult$model$covariateImportance
+  nFeatures <- if (is.null(covariateImportance)) 0 else nrow(covariateImportance)
+  
   featureImportance <- data.frame(
-    model = splitInfo$model,
-    plp = splitInfo$plp,
-    covariates = splitInfo$covariates,
-    iteration = splitInfo$iteration,
+    model = rep(splitInfo$model, nFeatures),
+    plp = rep(splitInfo$plp, nFeatures),
+    covariates = rep(splitInfo$covariates, nFeatures),
+    iteration = rep(splitInfo$iteration, nFeatures),
     covariateId = covariateImportance$covariateId,
     covariateName = covariateImportance$covariateName,
     covariateValue = as.numeric(covariateImportance$covariateValue),
@@ -197,7 +202,7 @@ createPerformancePlot <- function(summaryResults, outputFolder) {
   
   # Figure summarize performance metrics across models
   metrics <- summaryResults$metricsAll
-  metrics$modelLabel <- paste(metrics$model, metrics$plp, metrics$covariates, sep = " | ")
+  metrics$modelLabel <- paste(metrics$model)
   
   plotData <- rbind(
     aggregateMetric(metrics, "auc", "AUC"),
@@ -217,7 +222,7 @@ createPerformancePlot <- function(summaryResults, outputFolder) {
     ggplot2::facet_wrap(~plp) +
     ggplot2::scale_fill_manual(values = studyPlotPalette, drop = FALSE) +
     ggplot2::coord_cartesian(ylim = c(0, 1)) +
-    ggplot2::labs(title = "Performance", x = "Metric", y = "Score", fill = "Model") +
+    ggplot2::labs(title = "Predictive performance", x = "Metric", y = "Score", fill = "Model") +
     ggplot2::theme_minimal()
   
   ggplot2::ggsave(filename = file.path(outputFolder, "performance_metrics.png"), plot = plot, width = 8, height = 6, dpi = 300)
@@ -349,7 +354,7 @@ createCalibrationCurvePlot <- function(summaryResults, outputFolder) {
   plot
 }
 
-createConsistencyPlot <- function(summaryResults, outputFolder, deviationThreshold = 0.05) {
+createConsistencyPlot <- function(summaryResults, outputFolder, deviationThreshold = 0.1) {
   curveData <- summaryResults$curvesAll
   
   spreadData <- curveData |>
@@ -361,6 +366,9 @@ createConsistencyPlot <- function(summaryResults, outputFolder, deviationThresho
     ) |>
     dplyr::filter(nIterations >= 2) # iterations do not necessarily have same individuals in test set
   
+  # Fix to include existing score.
+  spreadData <- rbind(spreadData, list("CHADS2", "existing", 1, 2, 0.0), list("CHADS2", "existing", 2, 3, 0.0), list("CHADS2", "existing", 3, 4, 0.0))
+ 
   modelSummary <- spreadData |>
     dplyr::group_by(plp, model) |>
     dplyr::summarise(
@@ -369,7 +377,10 @@ createConsistencyPlot <- function(summaryResults, outputFolder, deviationThresho
       pctHighDeviation = ifelse(nRows > 0, 100 * nHighDeviation / nRows, NA_real_),
       .groups = "drop"
     ) |>
-    dplyr::mutate(label = sprintf("%.1f%% > %.1f%% (N=%s)", pctHighDeviation, 100 * deviationThreshold, format(nRows, big.mark = ",")))
+    dplyr::mutate(label = sprintf("%.1f%%", pctHighDeviation))
+    
+  # Fix to include existing score.
+  # modelSummary <- rbind(modelSummary, list("CHADS2", "existing", 14465, 0, 0.0, "0.0%"))
   
   plot <- ggplot2::ggplot(spreadData, ggplot2::aes(x = model, y = predRange, fill = model)) +
     ggplot2::geom_violin(alpha = 0.25, color = NA, trim = TRUE) +
@@ -496,7 +507,7 @@ createFairnessPlot <- function(summaryResults, outputFolder) {
   axisLimit <- max(axisLimit, 0.05)
   axisLimit <- min(0.5, axisLimit * 1.1)
   labelOffset <- axisLimit * 0.75
-  plot <- ggplot2::ggplot(fairnessData, ggplot2::aes(x = x_mean, y = y_mean, color = plp, shape = model)) +
+  plot <- ggplot2::ggplot(fairnessData, ggplot2::aes(x = x_mean, y = y_mean, color = model, shape = model)) +
     ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
     ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
     ggplot2::geom_segment(ggplot2::aes(x = x_min, xend = x_max, y = y_mean, yend = y_mean), linewidth = 0.7, alpha = 0.9) +
@@ -507,9 +518,10 @@ createFairnessPlot <- function(summaryResults, outputFolder) {
     ggplot2::annotate("text", x = labelOffset, y = 0, label = "Lower FPR\nfor males", size = 3, hjust = 0) +
     ggplot2::annotate("text", x = 0, y = labelOffset, label = "Higher TPR\nfor females", size = 3, vjust = -0.2) +
     ggplot2::annotate("text", x = 0, y = -labelOffset, label = "Higher TPR\nfor males", size = 3, vjust = 1.2) +
+    ggplot2::facet_wrap(~plp) +
     ggplot2::scale_color_manual(values = studyPlotPalette, drop = FALSE) +
     ggplot2::coord_equal(xlim = c(-axisLimit, axisLimit), ylim = c(-axisLimit, axisLimit), expand = TRUE) +
-    ggplot2::labs(title = "Fairness", x = "FPR female - FPR male", y = "TPR female - TPR male", color = "Task", shape = "Model") +
+    ggplot2::labs(title = "Fairness", x = "FPR female - FPR male", y = "TPR female - TPR male", color = "Model", shape = "Model") +
     ggplot2::theme_minimal()
   ggplot2::ggsave(filename = file.path(outputFolder, "fairness_metrics.png"), plot = plot, width = 8, height = 6, dpi = 300)
   plot
