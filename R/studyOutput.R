@@ -10,7 +10,7 @@ studyOutput <- function(outputFolder) {
   runFolders <- runFolders[file.exists(file.path(runFolders, "plpResult", "runPlp.rds"))]
   
   runFolders <- runFolders[-grep("XGBoost", runFolders)] # Fix to remove XGBoost results for MIE abstract.
-
+  
   if (length(runFolders) == 0) {
     stop("studyOutput: no PLP results found in ", outputFolder)
   }
@@ -133,18 +133,101 @@ summariseRun <- function(runFolder) {
   )
   
   covariateImportance <- plpResult$model$covariateImportance
-  nFeatures <- if (is.null(covariateImportance)) 0 else nrow(covariateImportance)
   
-  featureImportance <- data.frame(
-    model = rep(splitInfo$model, nFeatures),
-    plp = rep(splitInfo$plp, nFeatures),
-    covariates = rep(splitInfo$covariates, nFeatures),
-    iteration = rep(splitInfo$iteration, nFeatures),
-    covariateId = covariateImportance$covariateId,
-    covariateName = covariateImportance$covariateName,
-    covariateValue = as.numeric(covariateImportance$covariateValue),
-    stringsAsFactors = FALSE
-  )
+  if ((is.null(covariateImportance) || nrow(covariateImportance) == 0) && "top_5_features" %in% colnames(predictions)) {
+    topFeaturesLong <- lapply(seq_len(nrow(predictions)), function(i) {
+      topFeatures <- predictions$top_5_features[[i]]
+      if (is.null(topFeatures) || nrow(topFeatures) == 0 || !"feature_name" %in% colnames(topFeatures)) {
+        return(NULL)
+      }
+      if ("positive" %in% colnames(topFeatures)) {
+        topFeatures <- topFeatures[topFeatures$positive %in% TRUE, , drop = FALSE]
+      }
+      featureNames <- trimws(as.character(topFeatures$feature_name))
+      featureNames <- featureNames[!is.na(featureNames) & nzchar(featureNames)]
+      if (length(featureNames) == 0) {
+        return(NULL)
+      }
+      data.frame(
+        rowId = rep(predictions$rowId[i], length(featureNames)),
+        featureKey = tolower(featureNames),
+        stringsAsFactors = FALSE
+      )
+    })
+    topFeaturesLong <- topFeaturesLong[!vapply(topFeaturesLong, is.null, logical(1))]
+
+    if (length(topFeaturesLong) == 0) {
+      featureImportance <- data.frame(
+        model = character(0),
+        plp = character(0),
+        covariates = character(0),
+        iteration = integer(0),
+        covariateId = character(0),
+        covariateName = character(0),
+        covariateValue = numeric(0),
+        stringsAsFactors = FALSE
+      )
+    } else {
+      topFeaturesLong <- do.call(rbind, topFeaturesLong)
+
+      covariateSummary <- plpResult$covariateSummary
+      covariateRef <- data.frame(
+        covariateId = as.character(covariateSummary$covariateId),
+        covariateName = as.character(covariateSummary$covariateName),
+        featureKey = tolower(trimws(sub(".*: ", "", as.character(covariateSummary$covariateName)))),
+        presentCount = as.numeric(covariateSummary$TestWithNoOutcome_CovariateCount) + as.numeric(covariateSummary$TestWithOutcome_CovariateCount),
+        stringsAsFactors = FALSE
+      )
+      covariateRef <- covariateRef[!is.na(covariateRef$featureKey) & nzchar(covariateRef$featureKey), , drop = FALSE]
+      covariateRef <- covariateRef[order(-covariateRef$presentCount), , drop = FALSE]
+      covariateRef <- covariateRef[!duplicated(covariateRef$featureKey), , drop = FALSE]
+
+      topFeaturesLong <- merge(topFeaturesLong, covariateRef, by = "featureKey")
+      topFeaturesLong <- unique(topFeaturesLong[, c("rowId", "covariateId", "covariateName", "presentCount"), drop = FALSE])
+
+      if (nrow(topFeaturesLong) == 0) {
+        featureImportance <- data.frame(
+          model = character(0),
+          plp = character(0),
+          covariates = character(0),
+          iteration = integer(0),
+          covariateId = character(0),
+          covariateName = character(0),
+          covariateValue = numeric(0),
+          stringsAsFactors = FALSE
+        )
+      } else {
+        featureCounts <- stats::aggregate(
+          rowId ~ covariateId + covariateName + presentCount,
+          data = topFeaturesLong,
+          FUN = function(x) length(unique(x))
+        )
+        nFeatures <- nrow(featureCounts)
+        featureImportance <- data.frame(
+          model = rep(splitInfo$model, nFeatures),
+          plp = rep(splitInfo$plp, nFeatures),
+          covariates = rep(splitInfo$covariates, nFeatures),
+          iteration = rep(splitInfo$iteration, nFeatures),
+          covariateId = featureCounts$covariateId,
+          covariateName = featureCounts$covariateName,
+          covariateValue = featureCounts$rowId / pmax(1, as.numeric(featureCounts$presentCount)),
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  } else {
+    nFeatures <- if (is.null(covariateImportance)) 0 else nrow(covariateImportance)
+    featureImportance <- data.frame(
+      model = rep(splitInfo$model, nFeatures),
+      plp = rep(splitInfo$plp, nFeatures),
+      covariates = rep(splitInfo$covariates, nFeatures),
+      iteration = rep(splitInfo$iteration, nFeatures),
+      covariateId = covariateImportance$covariateId,
+      covariateName = covariateImportance$covariateName,
+      covariateValue = as.numeric(covariateImportance$covariateValue),
+      stringsAsFactors = FALSE
+    )
+  }
   
   list(metrics = metrics, curves = curves, featureImportance = featureImportance)
 }
@@ -368,7 +451,7 @@ createConsistencyPlot <- function(summaryResults, outputFolder, deviationThresho
   
   # Fix to include existing score.
   spreadData <- rbind(spreadData, list("CHADS2", "existing", 1, 2, 0.0), list("CHADS2", "existing", 2, 3, 0.0), list("CHADS2", "existing", 3, 4, 0.0))
- 
+  
   modelSummary <- spreadData |>
     dplyr::group_by(plp, model) |>
     dplyr::summarise(
@@ -378,7 +461,7 @@ createConsistencyPlot <- function(summaryResults, outputFolder, deviationThresho
       .groups = "drop"
     ) |>
     dplyr::mutate(label = sprintf("%.1f%%", pctHighDeviation))
-    
+  
   # Fix to include existing score.
   # modelSummary <- rbind(modelSummary, list("CHADS2", "existing", 14465, 0, 0.0, "0.0%"))
   
@@ -529,7 +612,7 @@ createFairnessPlot <- function(summaryResults, outputFolder) {
 
 createStabilityPlot <- function(summaryResults, outputFolder) {
   featureImportance <- summaryResults$featureImportanceAll
- 
+  
   medianSelected <- featureImportance |>
     dplyr::group_by(plp, model, iteration) |>
     dplyr::summarise(n_selected = sum(abs(covariateValue) > 0), .groups = "drop") |>
@@ -546,7 +629,7 @@ createStabilityPlot <- function(summaryResults, outputFolder) {
   
   interpretabilitySummary <- dplyr::left_join(medianSelected, stabilityData, by = c("plp", "model")) |>
     dplyr::mutate(stability_plot = dplyr::if_else(is.na(stability_nogueira), 0, stability_nogueira))
-
+  
   plot <- ggplot2::ggplot(interpretabilitySummary, ggplot2::aes(x = model, y = stability_plot, fill = model)) +
     ggplot2::geom_col(width = 0.7, na.rm = TRUE) +
     ggplot2::geom_text(ggplot2::aes(label = paste0("Median # features: ", median_selected_features)), vjust = -0.4, size = 3, na.rm = TRUE) +
@@ -562,7 +645,7 @@ createStabilityPlot <- function(summaryResults, outputFolder) {
 
 createFeatureHeatmap <- function(summaryResults, outputFolder, topN = 20) {
   featureImportance <- summaryResults$featureImportanceAll
-
+  
   topVariables <- featureImportance |>
     dplyr::group_by(plp, covariateId, covariateName) |>
     dplyr::summarise(mean_abs_importance = mean(abs(covariateValue), na.rm = TRUE), .groups = "drop") |>
@@ -574,7 +657,7 @@ createFeatureHeatmap <- function(summaryResults, outputFolder, topN = 20) {
     dplyr::group_by(plp, model, covariateId, covariateName) |>
     dplyr::summarise(freq_selected = mean(abs(covariateValue) > 0, na.rm = TRUE), .groups = "drop")
   heatmapData$covariateName <- factor(heatmapData$covariateName, levels = rev(unique(topVariables$covariateName)))
-
+  
   plot <- ggplot2::ggplot(heatmapData, ggplot2::aes(x = model, y = covariateName, fill = freq_selected)) +
     ggplot2::geom_tile(color = "white") +
     ggplot2::geom_text(ggplot2::aes(label = sprintf("%.2f", freq_selected)), size = 2.8) +
