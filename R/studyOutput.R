@@ -18,6 +18,8 @@ studyOutput <- function(outputFolder, regeneratePlpPlots = TRUE) {
   # Collect output
   summaryResults <- summarizeResults(runFolders, regeneratePlpPlots)
   saveRDS(summaryResults, file.path(outputFolder, "summaryResults.rds"))
+  utils::write.csv(summaryResults$featureImportanceAll,
+                  file.path(outputFolder, "feature_importance_by_run.csv"), row.names = FALSE)
   
   # Create plots
   # summaryResults <- readRDS(file.path(outputFolder, "summaryResults.rds"))
@@ -188,15 +190,17 @@ summariseRun <- function(runFolder, regeneratePlpPlots = TRUE) {
       dplyr::select(rowId, covariateId, covariateName, positive, feature_name, dist_score) |>
       dplyr::mutate(model = splitInfo$model, plp = splitInfo$plp,
                     covariates = splitInfo$covariates, iteration = splitInfo$iteration)
-    counts <- matched |>
-      dplyr::distinct(rowId, covariateId) |>
-      dplyr::count(covariateId, name = "mentionCount")
-    covariateImportance <- covariates |>
-      dplyr::ungroup() |>
-      dplyr::distinct(covariateId, .keep_all = TRUE) |>
-      dplyr::left_join(counts, by = "covariateId") |>
-      dplyr::mutate(covariateValue = if (length(validIds) > 0)
-        dplyr::coalesce(mentionCount, 0L) / length(validIds) else NA_real_)
+    # llmPredict builds its prompts from every stored covariate row, including
+    # demographics. Do not substitute covariateValue > 0 for actual exposure.
+    dataFolder <- file.path(dirname(runFolder), paste0("plpData_", splitInfo$plp, "_", splitInfo$covariates))
+    plpData <- PatientLevelPrediction::loadPlpData(dataFolder)
+    exposure <- as.data.frame(plpData$covariateData$covariates) |>
+      dplyr::filter(rowId %in% validIds) |>
+      dplyr::distinct(rowId, covariateId)
+    covariateImportance <- conditionalMentionRates(matched, exposure, covariates)
+    localFeatureImportance <- localFeatureImportance |>
+      dplyr::left_join(dplyr::mutate(exposure, supplied = TRUE), by = c("rowId", "covariateId")) |>
+      dplyr::mutate(supplied = dplyr::coalesce(supplied, FALSE))
     explanationPatients$matchedFeatures <- vapply(validIds, function(id)
       length(unique(matched$covariateId[matched$rowId == id])), integer(1))
   }
@@ -214,9 +218,33 @@ summariseRun <- function(runFolder, regeneratePlpPlots = TRUE) {
     stringsAsFactors = FALSE
   )
   featureImportance$importanceType <- rep(if (is.null(explanationPatients)) "coefficient" else "mention_frequency", nrow(featureImportance))
+  for (column in c("mentionCount", "exposureCount", "unsupportedMentionCount")) {
+    featureImportance[[column]] <- if (is.null(explanationPatients)) rep(NA_integer_, nFeatures) else covariateImportance[[column]]
+  }
   
   list(metrics = metrics, curves = curves, featureImportance = featureImportance,
        localFeatureImportance = localFeatureImportance, explanationPatients = explanationPatients)
+}
+
+# Conditional on feature exposure among test patients with a valid explanation.
+# Unsupported mentions remain auditable but do not enter the numerator.
+conditionalMentionRates <- function(matched, exposure, covariates) {
+  mentions <- dplyr::distinct(matched, rowId, covariateId)
+  exposure <- dplyr::distinct(exposure, rowId, covariateId)
+  counts <- mentions |>
+    dplyr::semi_join(exposure, by = c("rowId", "covariateId")) |>
+    dplyr::count(covariateId, name = "mentionCount")
+  unsupported <- mentions |>
+    dplyr::anti_join(exposure, by = c("rowId", "covariateId")) |>
+    dplyr::count(covariateId, name = "unsupportedMentionCount")
+  covariates |>
+    dplyr::ungroup() |>
+    dplyr::distinct(covariateId, .keep_all = TRUE) |>
+    dplyr::left_join(dplyr::count(exposure, covariateId, name = "exposureCount"), by = "covariateId") |>
+    dplyr::left_join(counts, by = "covariateId") |>
+    dplyr::left_join(unsupported, by = "covariateId") |>
+    dplyr::mutate(dplyr::across(c(mentionCount, exposureCount, unsupportedMentionCount), ~dplyr::coalesce(.x, 0L)),
+      covariateValue = dplyr::if_else(exposureCount > 0, mentionCount / exposureCount, NA_real_))
 }
 
 confusionRates <- function(data, threshold) {
@@ -611,22 +639,45 @@ selectLeadingFeatures <- function(features, topK = 20) {
     dplyr::ungroup()
 }
 
-createStabilityPlot <- function(summaryResults, outputFolder, topK = 20) {
-  features <- selectLeadingFeatures(summaryResults$featureImportanceAll, topK)
+selectThresholdFeatures <- function(features, mentionThreshold = 0.2, minExposure = 20) {
+  stopifnot(mentionThreshold >= 0, mentionThreshold <= 1, minExposure >= 1)
+  if (!"importanceType" %in% names(features)) features$importanceType <- "coefficient"
+  if (!"exposureCount" %in% names(features)) stop("Regenerate summaries with exposure counts first")
+  features |>
+    dplyr::group_by(plp, covariates, model) |>
+    dplyr::mutate(nRuns = dplyr::n_distinct(iteration)) |>
+    dplyr::group_by(plp, covariates, model, covariateId) |>
+    dplyr::mutate(eligible = if (dplyr::first(importanceType) == "mention_frequency")
+      dplyr::n_distinct(iteration) == dplyr::first(nRuns) &&
+        all(is.finite(exposureCount) & exposureCount >= minExposure & is.finite(covariateValue))
+      else TRUE) |>
+    dplyr::ungroup() |>
+    dplyr::mutate(selected = eligible & is.finite(covariateValue) &
+      ifelse(importanceType == "mention_frequency", covariateValue >= mentionThreshold,
+             abs(covariateValue) > 0))
+}
+
+createStabilityPlot <- function(summaryResults, outputFolder, mentionThreshold = 0.2, minExposure = 20,
+                               fileStem = "interpretability_stability") {
+  features <- selectThresholdFeatures(summaryResults$featureImportanceAll, mentionThreshold, minExposure)
+  utils::write.csv(features, file.path(outputFolder, paste0(fileStem, "_selection_by_run.csv")), row.names = FALSE)
   stability <- features |>
     dplyr::group_by(plp, covariates, model) |>
     dplyr::group_modify(~{
       # Retain zero columns and runs with no selected features.
       iterations <- sort(unique(.x$iteration))
+      .x <- .x[.x$eligible, , drop = FALSE]
       ids <- sort(unique(as.character(.x$covariateId)))
       m <- matrix(0, length(iterations), length(ids))
       usable <- is.finite(.x$covariateValue)
-      if (any(!usable)) return(data.frame(stability = NA_real_, medianSelected = NA_real_))
+      if (any(!iterations %in% .x$iteration[usable])) return(data.frame(stability = NA_real_, medianSelected = NA_real_, eligibleFeatures = length(ids)))
       m[cbind(match(.x$iteration, iterations), match(as.character(.x$covariateId), ids))] <- as.integer(.x$selected)
       data.frame(stability = nogueiraStability(m),
-                 medianSelected = stats::median(rowSums(m)))
+                 medianSelected = stats::median(rowSums(m)), eligibleFeatures = length(ids))
     }) |> dplyr::ungroup()
-  utils::write.csv(stability, file.path(outputFolder, "interpretability_stability.csv"), row.names = FALSE)
+  stability$mentionThreshold <- mentionThreshold
+  stability$minExposure <- minExposure
+  utils::write.csv(stability, file.path(outputFolder, paste0(fileStem, ".csv")), row.names = FALSE)
   plot <- ggplot2::ggplot(stability, ggplot2::aes(model, stability, fill = model)) +
     ggplot2::geom_col(na.rm = TRUE) +
     ggplot2::geom_text(ggplot2::aes(y = dplyr::coalesce(stability, 0),
@@ -635,10 +686,11 @@ createStabilityPlot <- function(summaryResults, outputFolder, topK = 20) {
     ggplot2::facet_wrap(~plp + covariates) +
     ggplot2::scale_fill_manual(values = studyPlotPalette) +
     ggplot2::labs(title = "Population feature stability", x = "Model", y = "Nogueira stability",
-      subtitle = paste0("Top ", topK, " by absolute coefficient (Lasso) or mention frequency (LLM)")) +
+      subtitle = paste0("Lasso: nonzero coefficients; LLM: mention rate ≥ ", 100 * mentionThreshold,
+                        "%\nLLM eligibility: ≥ ", minExposure, " exposed patients in every run")) +
     ggplot2::theme_minimal() +
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1), legend.position = "none")
-  ggplot2::ggsave(file.path(outputFolder, "interpretability_stability.png"), plot, width = 10, height = 6, dpi = 300)
+  ggplot2::ggsave(file.path(outputFolder, paste0(fileStem, ".png")), plot, width = 10, height = 6, dpi = 300)
   plot
 }
 
@@ -668,7 +720,7 @@ createFeatureHeatmap <- function(summaryResults, outputFolder, topN = 20) {
   heatmapData <- heatmapData |>
     dplyr::semi_join(top, by = c("plp", "covariates", "covariateId")) |>
     dplyr::mutate(measure = ifelse(importanceType == "mention_frequency",
-      "LLM: proportion of explanations mentioning feature", "Model: proportion of runs selecting feature"))
+      "LLM: mention rate when feature supplied", "Model: proportion of runs selecting feature"))
   utils::write.csv(heatmapData, file.path(outputFolder, "interpretability_feature_heatmap.csv"), row.names = FALSE)
   plot <- ggplot2::ggplot(heatmapData, ggplot2::aes(model, covariateName, fill = frequency)) +
     ggplot2::geom_tile(color = "white") +
