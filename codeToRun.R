@@ -74,6 +74,7 @@ for (plp in plptasks) {
   #models <- c("LASSO")
   
   for (m in models) {
+    # TODO: We should rerun this for the different test sets to assess variation in performance due to sampling. 
     iterations_m <- ifelse(m != "ExistingScore", iterations, 1)
     
     for (i in 1:iterations_m) {

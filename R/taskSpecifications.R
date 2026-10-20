@@ -15,6 +15,7 @@ taskSpecifications <- function(plp, output) {
     outcomeNames <- 'outcome'
     
     # Select population
+    # TODO: Filter for unique patients? 
     populationSettings <- PatientLevelPrediction::createStudyPopulationSettings(
       requireTimeAtRisk = F,
       riskWindowStart = 1,
