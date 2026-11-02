@@ -1,4 +1,5 @@
 library(ggplot2)
+library(fuzzyjoin)
 
 studyPlotPalette <- c(
   "#0072B2", "#E69F00", "#009E73", "#D55E00",
@@ -22,8 +23,8 @@ studyOutput <- function(outputFolder, regeneratePlpPlots = TRUE) {
                   file.path(outputFolder, "feature_importance_by_run.csv"), row.names = FALSE)
   
   # Create plots
-  # summaryResults <- readRDS(file.path(outputFolder, "summaryResults.rds"))
-  plotResults(summaryResults, outputFolder)
+  # summaryResults <- readRDS(file.path(paste0(root,"/",outputFolder), "summaryResults.rds"))
+  plotResults(summaryResults, paste0(root,"/",outputFolder))
 }
 
 # Collect output helpers
@@ -322,7 +323,8 @@ createPerformancePlot <- function(summaryResults, outputFolder) {
     ggplot2::scale_fill_manual(values = studyPlotPalette, drop = FALSE) +
     ggplot2::coord_cartesian(ylim = c(0, 1)) +
     ggplot2::labs(title = "Predictive performance", x = "Metric", y = "Score", fill = "Model") +
-    ggplot2::theme_minimal()
+    ggplot2::theme_minimal() +
+    ggplot2::theme(panel.grid = ggplot2::element_blank())
   
   ggplot2::ggsave(filename = file.path(outputFolder, "performance_metrics.png"), plot = plot, width = 8, height = 6, dpi = 300)
   plot
@@ -490,7 +492,8 @@ createConsistencyPlot <- function(summaryResults, outputFolder, deviationThresho
     ggplot2::coord_cartesian(ylim = c(0, 1)) +
     ggplot2::labs(title = "Consistency", x = "Model", y = "Prediction range") +
     ggplot2::theme_minimal() +
-    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1), legend.position = "none")
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1), legend.position = "none",
+      panel.grid = ggplot2::element_blank())
   ggplot2::ggsave(filename = file.path(outputFolder, "consistency_plot.png"), plot = plot, width = 8, height = 6, dpi = 300)
   plot
 }
@@ -621,7 +624,8 @@ createFairnessPlot <- function(summaryResults, outputFolder) {
     ggplot2::scale_color_manual(values = studyPlotPalette, drop = FALSE) +
     ggplot2::coord_equal(xlim = c(-axisLimit, axisLimit), ylim = c(-axisLimit, axisLimit), expand = TRUE) +
     ggplot2::labs(title = "Fairness", x = "FPR female - FPR male", y = "TPR female - TPR male", color = "Model", shape = "Model") +
-    ggplot2::theme_minimal()
+    ggplot2::theme_minimal() +
+    ggplot2::theme(panel.grid = ggplot2::element_blank())
   ggplot2::ggsave(filename = file.path(outputFolder, "fairness_metrics.png"), plot = plot, width = 8, height = 6, dpi = 300)
   plot
 }
@@ -677,19 +681,31 @@ createStabilityPlot <- function(summaryResults, outputFolder, mentionThreshold =
     }) |> dplyr::ungroup()
   stability$mentionThreshold <- mentionThreshold
   stability$minExposure <- minExposure
+  
+  existingRows <- summaryResults$metricsAll |>
+    dplyr::filter(model == "existing") |>
+    dplyr::distinct(plp, covariates) |>
+    dplyr::mutate(model = "existing", stability = 1, medianSelected = 5,
+      eligibleFeatures = 5)
+  stability <- stability |>
+    dplyr::filter(model != "existing") |>
+    dplyr::bind_rows(existingRows)
+  
   utils::write.csv(stability, file.path(outputFolder, paste0(fileStem, ".csv")), row.names = FALSE)
   plot <- ggplot2::ggplot(stability, ggplot2::aes(model, stability, fill = model)) +
     ggplot2::geom_col(na.rm = TRUE) +
     ggplot2::geom_text(ggplot2::aes(y = dplyr::coalesce(stability, 0),
       label = ifelse(is.na(stability), "Unavailable",
                      paste0("Median # features: ", medianSelected))), vjust = -0.4, size = 3) +
-    ggplot2::facet_wrap(~plp + covariates) +
+    ggplot2::facet_wrap(~plp) +
     ggplot2::scale_fill_manual(values = studyPlotPalette) +
-    ggplot2::labs(title = "Population feature stability", x = "Model", y = "Nogueira stability",
-      subtitle = paste0("Lasso: nonzero coefficients; LLM: mention rate ≥ ", 100 * mentionThreshold,
-                        "%\nLLM eligibility: ≥ ", minExposure, " exposed patients in every run")) +
+    ggplot2::labs(title = "Interpretability", x = "Model", y = "Nogueira stability") +
+    # ggplot2::labs(title = "Population feature stability", x = "Model", y = "Nogueira stability",
+    #   subtitle = paste0("Lasso: nonzero coefficients; LLM: mention rate ≥ ", 100 * mentionThreshold,
+    #                     "%\nLLM eligibility: ≥ ", minExposure, " exposed patients in every run")) +
     ggplot2::theme_minimal() +
-    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1), legend.position = "none")
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1), legend.position = "none",
+      panel.grid = ggplot2::element_blank())
   ggplot2::ggsave(file.path(outputFolder, paste0(fileStem, ".png")), plot, width = 10, height = 6, dpi = 300)
   plot
 }
