@@ -89,8 +89,8 @@ for (plp in plptasks) {
 }
 
 ### Evaluation metrics & output figures
-outputFolder <- "/Users/amarkus/Git/Projects/PLP-LLM/output/2026-10-15"
-studyOutput(outputFolder)
+outputFolder <- "/output/2026-10-15"
+studyOutput(paste0(root,"/",outputFolder))
 
 ### Check PLP shiny
 # runFolders <- list.dirs(outputFolder, recursive = FALSE, full.names = TRUE)
