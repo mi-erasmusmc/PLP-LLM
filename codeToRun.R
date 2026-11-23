@@ -69,12 +69,12 @@ for (plp in plptasks) {
     outputFolder = outputFolder
   )
   
-  #models <- c("LASSO", "XGBoost","ExistingScore") # "ExistingScore", "LASSO", "LLM_Qwen3"
-  models <- c("LLM_Qwen3")
+  #models <- c("LASSO", "XGBoost","ExistingScore") # "ExistingScore", "LASSO", "LLMqwen3"
+  models <- c("LLMqwen3")
   #models <- c("LASSO")
   
   for (m in models) {
-    iterations_m <- ifelse(m != "ExistingScore", iterations, 1)
+    #iterations_m <- ifelse(m != "ExistingScore", iterations, 1) # turn of to run multiple iterations for existing score models
     
     for (i in 1:iterations_m) {
       runModels(

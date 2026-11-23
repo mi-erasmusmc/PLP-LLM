@@ -24,9 +24,9 @@ runModels <- function(plp, plpData, model, iteration, outputFolder) {
                                    probability = type_number(required = T)) # format for the structured output, it cannot do anything else then return a single number and a string.
     assign("format_typeobject",format_typeobject, envir = .GlobalEnv)
     
-    if (model == "LLM_Qwen3") {
-      model_settings <- list(analysisId=paste0("LLM_qwen_", plp),
-                             analysisName=paste0("LLM qwen3"),
+    if (model == "LLMqwen3") {
+      model_settings <- list(analysisId=paste0("LLMqwen", plp),
+                             analysisName=paste0("LLMqwen3"),
                              modelSettings=setLLM(model_name="qwen3:30b",
                                                   systemprompt = systemprompt,
                                                   format_typeobject = TRUE,
@@ -35,13 +35,14 @@ runModels <- function(plp, plpData, model, iteration, outputFolder) {
                                                   parallel = TRUE))
       
       
-    } else if (model == "LLM_Qwen3.8") {
-      model_settings <- list(analysisId=paste0("LLM_qwen_", plp),
-                             analysisName=paste0("LLM qwen3.8"),
+    } else if (model == "LLMqwen3.8") {
+      model_settings <- list(analysisId=paste0("LLMqwen", plp),
+                             analysisName=paste0("LLMMqwen3.8"),
                              modelSettings=setLLM(model_name="qwen3.8",
                                                   systemprompt = systemprompt,
                                                   format_typeobject = TRUE,
                                                   temperature = 0.2,
+                                                  tempsavelocation = paste0(outputFolder,"/LLM_qwen3_temp_it",iteration),
                                                   parallel = TRUE))
     }
   
@@ -72,7 +73,7 @@ runModels <- function(plp, plpData, model, iteration, outputFolder) {
                                                                                          trainFraction = 0.75,
                                                                                          splitSeed=seed, # Change seed per iteration
                                                                                          nfold = 3,
-                                                                                         type = 'stratified'),
+                                                                                         type = 'subject'),
                                                sampleSettings = createSampleSettings(),
                                                featureEngineeringSettings = createFeatureEngineeringSettings(),
                                                preprocessSettings = createPreprocessSettings(minFraction = 0.001,
